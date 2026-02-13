@@ -1,0 +1,42 @@
+import os
+import time
+import threading
+from flask import Flask, jsonify
+from trader import Trader
+
+app = Flask(__name__)
+
+state = {
+    "running": False,
+    "last_heartbeat": None,
+    "last_event": None,
+    "last_error": None,
+}
+
+trader = Trader(state)
+
+@app.route("/")
+def home():
+    return "Bot Running"
+
+@app.route("/health")
+def health():
+    return jsonify({**state, **trader.public_state()})
+
+def loop():
+    state["running"] = True
+    trader.notify("🤖 Bot started")
+
+    while True:
+        try:
+            state["last_heartbeat"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            trader.tick()
+            state["last_error"] = None
+        except Exception as e:
+            state["last_error"] = str(e)
+
+        time.sleep(15)
+
+if __name__ == "__main__":
+    threading.Thread(target=loop).start()
+    app.run(host="0.0.0.0", port=8000)
