@@ -1,3 +1,4 @@
+import os
 import time
 import threading
 from flask import Flask, jsonify
@@ -14,11 +15,11 @@ state = {
 
 trader = Trader(state)
 
-@app.route("/")
+@app.get("/")
 def home():
     return "Bot Running"
 
-@app.route("/health")
+@app.get("/health")
 def health():
     return jsonify({**state, **trader.public_state()})
 
@@ -33,10 +34,10 @@ def loop():
             state["last_error"] = None
         except Exception as e:
             state["last_error"] = str(e)
-            trader.notify(f"❌ Error: {e}")
+            trader.notify(f"❌ 루프 에러: {e}")
 
-        time.sleep(60)
+        time.sleep(int(os.getenv("LOOP_SECONDS", "60")))
 
 if __name__ == "__main__":
-    threading.Thread(target=loop).start()
+    threading.Thread(target=loop, daemon=True).start()
     app.run(host="0.0.0.0", port=8000)
