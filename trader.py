@@ -1,11 +1,7 @@
 import requests
 from config import *
 
-BASE_URL = "https://api.bybit.com"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+BINANCE_URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
 
 
 class Trader:
@@ -25,26 +21,14 @@ class Trader:
             except:
                 pass
 
+    # ✅ Binance 가격 조회 (안정)
     def get_price(self):
         try:
-            url = f"{BASE_URL}/v5/market/tickers?category=linear&symbol={SYMBOL}"
-            r = requests.get(url, headers=HEADERS, timeout=10)
-
-            # 응답 내용 확인
-            if not r.text:
-                self.notify("⚠️ 빈 응답 수신")
-                return None
-
+            r = requests.get(BINANCE_URL, timeout=10)
             data = r.json()
-
-            if "result" not in data:
-                self.notify(f"⚠️ API 오류: {data}")
-                return None
-
-            return float(data["result"]["list"][0]["lastPrice"])
-
-        except Exception as e:
-            self.notify(f"⚠️ 가격 조회 실패")
+            return float(data["price"])
+        except:
+            self.notify("⚠️ 가격 조회 실패")
             return None
 
     def place_order(self, side):
@@ -63,6 +47,7 @@ class Trader:
         self.state["last_price"] = price
         self.state["last_event"] = f"Price: {price}"
 
+        # ===== 진입 =====
         if not self.position:
             self.position = "LONG"
             self.entry_price = price
@@ -70,6 +55,7 @@ class Trader:
             self.notify(f"📈 LONG 진입: {price}")
             return
 
+        # ===== 손절 / 익절 =====
         change = ((price - self.entry_price) / self.entry_price) * 100
 
         if change <= -MAX_LOSS_PERCENT:
