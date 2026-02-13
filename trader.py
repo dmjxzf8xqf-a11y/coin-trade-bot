@@ -6,7 +6,19 @@ import requests
 from urllib.parse import urlencode
 from config import *
 
+# ✅ CloudFront/WAF 회피용 기본 헤더
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+# ✅ Bybit 차단 회피: config.py에 뭐가 있든 여기서 강제 치환
+try:
+    BYBIT_BASE_URL = (BYBIT_BASE_URL or "").strip()
+except:
+    BYBIT_BASE_URL = "https://api.bybit.com"
+
+if "api.bybit.com" in BYBIT_BASE_URL:
+    BYBIT_BASE_URL = BYBIT_BASE_URL.replace("https://api.bybit.com", "https://api.bytick.com").replace(
+        "http://api.bybit.com", "https://api.bytick.com"
+    )
 
 # 가격 소스(다중)
 BINANCE = "https://api.binance.com/api/v3/ticker/price"
@@ -108,6 +120,7 @@ class Trader:
         pre = ts + BYBIT_API_KEY + recv + body_str
         sign = hmac.new(BYBIT_API_SECRET.encode(), pre.encode(), hashlib.sha256).hexdigest()
         headers = {
+            **HEADERS,  # ✅ UA/Accept 항상 포함
             "Content-Type": "application/json",
             "X-BAPI-API-KEY": BYBIT_API_KEY,
             "X-BAPI-SIGN": sign,
@@ -124,6 +137,7 @@ class Trader:
         pre = ts + BYBIT_API_KEY + recv + query
         sign = hmac.new(BYBIT_API_SECRET.encode(), pre.encode(), hashlib.sha256).hexdigest()
         headers = {
+            **HEADERS,  # ✅ UA/Accept 항상 포함
             "X-BAPI-API-KEY": BYBIT_API_KEY,
             "X-BAPI-SIGN": sign,
             "X-BAPI-SIGN-TYPE": "2",
@@ -136,8 +150,16 @@ class Trader:
         if DRY_RUN:
             return {"retCode": 0, "retMsg": "DRY_RUN", "result": {}}
         h, b = self._sign_post(body)
-        r = requests.post(BYBIT_BASE_URL + path, headers=h, data=b, timeout=15)
+        url = BYBIT_BASE_URL + path
+        r = requests.post(url, headers=h, data=b, timeout=15)
         data = self._safe_json(r)
+
+        # ✅ 403 CloudFront 차단 감지 메시지 강화
+        if r.status_code == 403:
+            raise Exception(
+                f"Bybit 403 blocked (LTE IP). base={BYBIT_BASE_URL} raw={data.get('raw')}"
+            )
+
         if data.get("_non_json"):
             raise Exception(f"Bybit non-JSON status={data.get('status')} raw={data.get('raw')}")
         return data
@@ -149,6 +171,13 @@ class Trader:
         url = BYBIT_BASE_URL + path + ("?" + query if query else "")
         r = requests.get(url, headers=h, timeout=15)
         data = self._safe_json(r)
+
+        # ✅ 403 CloudFront 차단 감지 메시지 강화
+        if r.status_code == 403:
+            raise Exception(
+                f"Bybit 403 blocked (LTE IP). base={BYBIT_BASE_URL} raw={data.get('raw')}"
+            )
+
         if data.get("_non_json"):
             raise Exception(f"Bybit non-JSON status={data.get('status')} raw={data.get('raw')}")
         return data
