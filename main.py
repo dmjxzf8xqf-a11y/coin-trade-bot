@@ -35,7 +35,7 @@ def loop():
             state["last_error"] = str(e)
             trader.notify(f"❌ Error: {e}")
 
-        time.sleep(10)
+        time.sleep(60)
 
 if __name__ == "__main__":
     threading.Thread(target=loop).start()
