@@ -1,4 +1,3 @@
-import os
 import time
 import threading
 from flask import Flask, jsonify
@@ -25,7 +24,7 @@ def health():
 
 def loop():
     state["running"] = True
-    trader.notify("🤖 Bot started")
+    trader.notify("🤖 Bot Started")
 
     while True:
         try:
@@ -34,8 +33,9 @@ def loop():
             state["last_error"] = None
         except Exception as e:
             state["last_error"] = str(e)
+            trader.notify(f"❌ Error: {e}")
 
-        time.sleep(15)
+        time.sleep(10)
 
 if __name__ == "__main__":
     threading.Thread(target=loop).start()
