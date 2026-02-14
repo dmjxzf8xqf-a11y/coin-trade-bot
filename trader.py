@@ -825,7 +825,7 @@ class Trader:
         ok, reason, score, sl_new, tp_new, a = compute_signal_and_exits(side, price)
 
         # trailing
-        if TRAIL_ON and a is not None:
+        if TRAIL_ON and a is not None and self.stop_price is not None:
             dist = a * TRAIL_ATR_MULT
             if side == "LONG":
                 cand = price - dist
@@ -836,7 +836,7 @@ class Trader:
                 if self.trail_price is None or cand < self.trail_price:
                     self.trail_price = cand
 
-        eff_stop = self.stop_price
+        eff_stop = self.stop_price if self.stop_price is not None else price
         if self.trail_price is not None:
             if side == "LONG":
                 eff_stop = max(eff_stop, self.trail_price)
