@@ -62,7 +62,7 @@ ENTER_SCORE_AGGRO = int(os.getenv("ENTER_SCORE_AGGRO","55"))
 EXIT_SCORE_DROP = int(os.getenv("EXIT_SCORE_DROP","35"))
 
 ALERT_COOLDOWN_SEC = int(os.getenv("ALERT_COOLDOWN_SEC","60"))
-COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC","1200"))
+COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC","0"))
 TIME_EXIT_MIN = int(os.getenv("TIME_EXIT_MIN","360"))
 
 MAX_ENTRIES_PER_DAY = int(os.getenv("MAX_ENTRIES_PER_DAY","6"))
