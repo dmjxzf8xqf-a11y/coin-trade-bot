@@ -283,7 +283,17 @@ def order_market(side: str, qty: float, reduce_only=False):
 def qty_from_order_usdt(order_usdt, lev, price):
     if order_usdt <= 0 or price <= 0:
         return 0.0
-    return float(f"{(order_usdt*lev/max(price,1e-9)):.6f}")
+
+    raw_qty = (order_usdt * lev) / price
+
+    # 🔥 코인별 최소 수량 단위
+    if "BTC" in SYMBOL:
+        step = 0.001
+    else:
+        step = 0.01   # ETH & 대부분 알트
+
+    qty = (raw_qty // step) * step
+    return round(qty, 6)
 
 # =========================
 # INDICATORS + SIGNAL
