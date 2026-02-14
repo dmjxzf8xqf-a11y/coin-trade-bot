@@ -873,25 +873,24 @@ class Trader:
             except Exception as e:
                 self.err_throttled(f"❌ partial TP 실패: {e}")
 
-        # SL/TP
-        # SL/TP
-if side == "LONG":
-    if eff_stop is not None and price <= eff_stop:
-        self.manual_exit("STOP/TRAIL")
-        return
+                # SL/TP
+        if side == "LONG":
+            if eff_stop is not None and price <= eff_stop:
+                self.manual_exit("STOP/TRAIL")
+                return
 
-    if self.tp_price is not None and price >= self.tp_price:
-        self.manual_exit("TAKE PROFIT")
-        return
+            if self.tp_price is not None and price >= self.tp_price:
+                self.manual_exit("TAKE PROFIT")
+                return
 
-else:
-    if eff_stop is not None and price >= eff_stop:
-        self.manual_exit("STOP/TRAIL")
-        return
+        else:
+            if eff_stop is not None and price >= eff_stop:
+                self.manual_exit("STOP/TRAIL")
+                return
 
-    if self.tp_price is not None and price <= self.tp_price:
-        self.manual_exit("TAKE PROFIT")
-        return
+            if self.tp_price is not None and price <= self.tp_price:
+                self.manual_exit("TAKE PROFIT")
+                return
 
         self.state["last_event"] = f"HOLD {side} score={score} stop={eff_stop:.2f} tp={self.tp_price:.2f}"
 
