@@ -1,5 +1,6 @@
 # trader.py (FULL COPY-PASTE)
 import os
+import math
 import time
 import json
 import hmac
