@@ -875,17 +875,18 @@ class Trader:
 
         # SL/TP
         if side == "LONG":
-            if price <= eff_stop:
-                self.manual_exit("STOP/TRAIL")
-                return
-            if price >= self.tp_price:
-                self.manual_exit("TAKE PROFIT")
-                return
+            if eff_stop is not None and price <= eff_stop:
+    self.manual_exit("STOP/TRAIL")
+    return
+
+if self.tp_price is not None and price >= self.tp_price:
+    self.manual_exit("TAKE PROFIT")
+    return
         else:
-            if price >= eff_stop:
+            if eff_stop is not None and price >= eff_stop:
                 self.manual_exit("STOP/TRAIL")
                 return
-            if price <= self.tp_price:
+            if self.tp_price is not None and price <= self.tp_price:
                 self.manual_exit("TAKE PROFIT")
                 return
 
