@@ -72,7 +72,8 @@ def _now_utc():
 
 def _day_key_utc():
     return _now_utc().strftime("%Y-%m-%d")
-    # ===== FULL QUANT ENGINE 2/5 : BYBIT API =====
+
+# ===== FULL QUANT ENGINE 2/5 : BYBIT API =====
 def _safe_json(r: requests.Response):
     text = r.text or ""
     if not text.strip():
@@ -193,7 +194,8 @@ def order_market(side: str, qty: float, reduce_only=False):
     if reduce_only:
         body["reduceOnly"] = True
     return bybit_post("/v5/order/create", body)
-    # ===== FULL QUANT ENGINE 3/5 : INDICATORS + AI SCORE =====
+
+# ===== FULL QUANT ENGINE 3/5 : INDICATORS + AI SCORE =====
 def ema(data, period):
     k = 2/(period+1)
     e = data[0]
@@ -236,16 +238,21 @@ def confidence_label(score):
     return "❌ 낮음"
 
 def build_reason(side, price, ema_fast, ema_slow, rsi_val, atr_val, score):
+    rsi_txt = f"{rsi_val:.1f}" if rsi_val is not None else "None"
+    atr_txt = f"{atr_val:.2f}" if atr_val is not None else "None"
     return (
         f"[{side}] 근거\n"
         f"- price={price:.2f}\n"
         f"- EMA{EMA_FAST}={ema_fast:.2f}, EMA{EMA_SLOW}={ema_slow:.2f}\n"
-        f"- RSI{RSI_PERIOD}={rsi_val:.1f}\n"
-        f"- ATR{ATR_PERIOD}={atr_val:.2f}\n"
+        f"- RSI{RSI_PERIOD}={rsi_txt}\n"
+        f"- ATR{ATR_PERIOD}={atr_txt}\n"
         f"- AI score={score} ({confidence_label(score)})\n"
-    )# ===== FULL QUANT ENGINE 4/5 : POSITION MGMT (SL/TP/TRAIL/TIME) =====
+    )
+
+# ===== FULL QUANT ENGINE 4/5 : POSITION MGMT PARAMS =====
 def mode_params():
-    if MODE == "AGGRO":
+    m = os.getenv("MODE", MODE).upper()
+    if m == "AGGRO":
         return {
             "lev": LEVERAGE_AGGRO,
             "order_usdt": ORDER_USDT_AGGRO,
@@ -262,31 +269,37 @@ def mode_params():
     }
 
 def qty_from_order_usdt(order_usdt, lev, price):
-    # 증거금 order_usdt로 notional=order_usdt*lev, qty=notional/price
     if order_usdt <= 0 or price <= 0:
         return 0.0
-    return float(f"{(order_usdt*lev/max(price,1e-9)):.6f}")# ===== FULL QUANT ENGINE 5/5 : TRADER + TELEGRAM COMMANDS + LOOP =====
+    return float(f"{(order_usdt*lev/max(price,1e-9)):.6f}")
+
+# ===== FULL QUANT ENGINE 5/5 : TRADER =====
 class Trader:
     def __init__(self, state=None):
         self.state = state if isinstance(state, dict) else {}
         self.trading_enabled = True
+
         self.position = None      # "LONG"/"SHORT"
         self.entry_price = None
         self.entry_ts = None
         self.stop_price = None
         self.tp_price = None
         self.trail_price = None
+
         self.consec_losses = 0
         self._cooldown_until = 0
         self._day_key = None
         self._day_entries = 0
+
         self.win = 0
         self.loss = 0
         self.day_profit = 0.0
+
         self._last_alert_ts = 0
         self._last_err_ts = 0
         self._lev_set = False
 
+    # ---- notify ----
     def notify(self, msg):
         print(msg)
         if BOT_TOKEN and CHAT_ID:
@@ -310,6 +323,7 @@ class Trader:
             self._last_err_ts = time.time()
             self.notify(msg)
 
+    # ---- day reset ----
     def _reset_day(self):
         dk = _day_key_utc()
         if self._day_key != dk:
@@ -319,6 +333,7 @@ class Trader:
             self.win = 0
             self.loss = 0
 
+    # ---- sync position ----
     def _sync_real_position(self):
         if DRY_RUN:
             return
@@ -411,9 +426,9 @@ class Trader:
         lines.append(f"🧠 DRY_RUN={DRY_RUN} | ON={self.trading_enabled} | MODE={os.getenv('MODE','SAFE')}")
         lines.append(f"⚙️ lev={mp['lev']} | order_usdt={mp['order_usdt']} | enter_score>={mp['enter_score']}")
         lines.append(f"🌐 base={BYBIT_BASE_URL} | proxy={'ON' if PROXIES else 'OFF'}")
-        if self.state.get("last_price") is not None:
+        if self.state.get('last_price') is not None:
             lines.append(f"💵 price={self.state.get('last_price'):.2f}")
-        if self.state.get("usdt_balance") is not None:
+        if self.state.get('usdt_balance') is not None:
             lines.append(f"💰 USDT={self.state.get('usdt_balance'):.2f}")
         lines.append(f"📍 POS={self.position or 'None'} entry={self.entry_price}")
         if self.stop_price and self.tp_price:
@@ -436,9 +451,8 @@ class Trader:
 
             mp = mode_params()
             price = get_last_price()
-            bal = get_wallet_usdt() if not DRY_RUN else float(self.state.get("paper_usdt", 30.0))
-
             lev = mp["lev"]
+
             if not self._lev_set and not DRY_RUN:
                 set_leverage(lev)
                 self._lev_set = True
@@ -448,11 +462,11 @@ class Trader:
                 self.notify("❌ qty 계산 실패")
                 return
 
-            # 근거도 같이 뽑아서 보여줌
             ok, reason, score, sl, tp = self._compute_signal_and_exits(side, price)
 
             if not DRY_RUN:
                 order_market("Buy" if side=="LONG" else "Sell", qty)
+
             self.position = side
             self.entry_price = price
             self.entry_ts = time.time()
@@ -475,15 +489,15 @@ class Trader:
                 return
 
             price = get_last_price()
-            qty = 0.001
+
             if not DRY_RUN:
                 p = get_position()
                 qty = float(p.get("size") or 0.0)
                 if qty > 0:
                     order_market("Sell" if self.position=="LONG" else "Buy", qty, reduce_only=True)
 
-            # PnL(대략, DRY_RUN은 추정)
-            if self.entry_price:
+            # PnL(대략)
+            if self.entry_price and self.position:
                 pnl = (price - self.entry_price) if self.position=="LONG" else (self.entry_price - price)
                 self.day_profit += pnl
                 if pnl >= 0: self.win += 1
@@ -492,6 +506,7 @@ class Trader:
                 else: self.consec_losses = 0
 
             self.notify(f"✅ 청산({why}) price={price:.2f} day_profit={self.day_profit:.2f}")
+
             self.position=None
             self.entry_price=None
             self.entry_ts=None
@@ -515,14 +530,16 @@ class Trader:
 
         efast = ema(closes[-(EMA_FAST*6):], EMA_FAST)
         eslow = ema(closes[-(EMA_SLOW*6):], EMA_SLOW)
-        r = rsi(closes, RSI_PERIOD) or 50.0
-        a = atr(highs, lows, closes, ATR_PERIOD) or (price*0.005)
+        r = rsi(closes, RSI_PERIOD)
+        a = atr(highs, lows, closes, ATR_PERIOD)
+
+        if r is None: r = 50.0
+        if a is None: a = price * 0.005
 
         score = ai_score(price, efast, eslow, r, a)
         mp = mode_params()
         enter_ok = score >= mp["enter_score"]
 
-        # 롱/숏 조건 분기
         if side == "LONG":
             trend_ok = price > eslow and efast > eslow
         else:
@@ -602,7 +619,6 @@ class Trader:
                     self.err_throttled(f"❌ leverage 설정 실패: {e}")
                     return
 
-            # LONG / SHORT 둘 다 스캔해서 더 점수 높은 쪽 선택
             best = None
             if ALLOW_LONG:
                 ok, reason, score, sl, tp = self._compute_signal_and_exits("LONG", price)
@@ -650,16 +666,15 @@ class Trader:
             side = self.position
             ok, reason, score, sl_new, tp_new = self._compute_signal_and_exits(side, price)
 
-            # 트레일링 스탑
+            # trailing
             if TRAIL_ON:
-                # 롱이면 가격이 오르면 stop 올림 / 숏이면 가격이 내리면 stop 내림
                 try:
                     kl = get_klines(ENTRY_INTERVAL, KLINE_LIMIT)
                     kl = list(reversed(kl))
                     closes = [float(x[4]) for x in kl]
                     highs = [float(x[2]) for x in kl]
-                    lows  = [float(x[3]) for x in kl]
                     a = atr(highs, lows, closes, ATR_PERIOD) or (price*0.005)
+                    lows  = [float(x[3]) for x in kl]
                     trail_dist = a * TRAIL_ATR_MULT
 
                     if side == "LONG":
@@ -673,7 +688,6 @@ class Trader:
                 except:
                     pass
 
-            # 실제 적용 stop은: 기본 stop vs trail 중 더 유리한 것
             eff_stop = self.stop_price
             if self.trail_price is not None:
                 if side == "LONG":
@@ -681,17 +695,17 @@ class Trader:
                 else:
                     eff_stop = min(eff_stop, self.trail_price)
 
-            # 시간청산
+            # time exit
             if self.entry_ts and (time.time() - self.entry_ts) > (TIME_EXIT_MIN*60):
                 self.manual_exit("TIME EXIT")
                 return
 
-            # 점수 급락 청산(조기 리스크 컷)
+            # score drop exit
             if score <= EXIT_SCORE_DROP:
                 self.manual_exit(f"SCORE DROP {score}")
                 return
 
-            # 손절/익절
+            # SL/TP
             if side == "LONG":
                 if price <= eff_stop:
                     self.manual_exit("STOP/TRAIL")
@@ -707,7 +721,6 @@ class Trader:
                     self.manual_exit("TAKE PROFIT")
                     return
 
-            # 상태 기록
             self.state["last_event"] = f"HOLD {side} score={score} stop={eff_stop:.2f} tp={self.tp_price:.2f}"
 
     def public_state(self):
@@ -731,4 +744,3 @@ class Trader:
             "last_price": self.state.get("last_price"),
             "usdt_balance": self.state.get("usdt_balance"),
         }
-    
