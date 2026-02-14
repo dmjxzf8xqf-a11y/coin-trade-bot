@@ -71,24 +71,21 @@ MAX_CONSEC_LOSSES = int(os.getenv("MAX_CONSEC_LOSSES","3"))
 # =========================
 # UPGRADE 1) fee/slippage PnL estimate
 # =========================
-# fee per side (taker rough): 0.0006 = 0.06%
-FEE_RATE = float(os.getenv("FEE_RATE", "0.0006"))
-# slippage in bps: 5 = 0.05%
-SLIPPAGE_BPS = float(os.getenv("SLIPPAGE_BPS", "5"))
+FEE_RATE = float(os.getenv("FEE_RATE", "0.0006"))       # per-side fee estimate
+SLIPPAGE_BPS = float(os.getenv("SLIPPAGE_BPS", "5"))    # bps (5 = 0.05%)
 
 # =========================
 # UPGRADE 2) partial take profit
 # =========================
 PARTIAL_TP_ON = str(os.getenv("PARTIAL_TP_ON","true")).lower() in ("1","true","yes","y")
-PARTIAL_TP_PCT = float(os.getenv("PARTIAL_TP_PCT", "0.5"))     # 0.5 = 50% 청산
-TP1_FRACTION = float(os.getenv("TP1_FRACTION", "0.5"))         # TP 거리의 50% 지점에서 1차 익절
+PARTIAL_TP_PCT = float(os.getenv("PARTIAL_TP_PCT", "0.5"))     # 0.5 = 50% close
+TP1_FRACTION = float(os.getenv("TP1_FRACTION", "0.5"))         # TP distance fraction for TP1
 MOVE_STOP_TO_BE_ON_TP1 = str(os.getenv("MOVE_STOP_TO_BE_ON_TP1","true")).lower() in ("1","true","yes","y")
 
 # =========================
 # UPGRADE 3) time-of-day filter (entry only, UTC)
 # =========================
-# e.g. "01-23" or "22-03" (wrap)
-TRADE_HOURS_UTC = os.getenv("TRADE_HOURS_UTC", "00-23")
+TRADE_HOURS_UTC = os.getenv("TRADE_HOURS_UTC", "00-23")  # "01-23" or "22-03"
 
 # =========================
 # PRICE FALLBACK
@@ -134,7 +131,7 @@ def fallback_price():
     return 0.0
 
 # =========================
-# BYBIT API
+# BYBIT API helpers
 # =========================
 def _safe_json(r: requests.Response):
     text = r.text or ""
@@ -307,4 +304,593 @@ def ai_score(price, ef, es, r, a):
     score=0
     if price>es: score+=25
     if price>ef: score+=20
-    if r is not None and 45<r<65
+    if r is not None and 45<r<65: score+=20
+    if ef>es: score+=20
+    if (a/price)<0.02: score+=15
+    return int(score)
+
+def confidence_label(score):
+    if score >= 85: return "🔥 매우높음"
+    if score >= 70: return "✅ 높음"
+    if score >= 55: return "⚠️ 보통"
+    return "❌ 낮음"
+
+def mode_params():
+    m = os.getenv("MODE", MODE).upper()
+    if m == "AGGRO":
+        return {
+            "lev": LEVERAGE_AGGRO,
+            "order_usdt": ORDER_USDT_AGGRO,
+            "stop_atr": STOP_ATR_MULT_AGGRO,
+            "tp_r": TP_R_MULT_AGGRO,
+            "enter_score": ENTER_SCORE_AGGRO,
+        }
+    return {
+        "lev": LEVERAGE_SAFE,
+        "order_usdt": ORDER_USDT_SAFE,
+        "stop_atr": STOP_ATR_MULT_SAFE,
+        "tp_r": TP_R_MULT_SAFE,
+        "enter_score": ENTER_SCORE_SAFE,
+    }
+
+def build_reason(side, price, ef, es, r, a, score, trend_ok, enter_ok):
+    return (
+        f"[{side}] 근거\n"
+        f"- price={price:.2f}\n"
+        f"- EMA{EMA_FAST}={ef:.2f}, EMA{EMA_SLOW}={es:.2f}\n"
+        f"- RSI{RSI_PERIOD}={r:.1f}\n"
+        f"- ATR{ATR_PERIOD}={a:.2f}\n"
+        f"- score={score} ({confidence_label(score)})\n"
+        f"- trend_ok={trend_ok} | enter_ok={enter_ok}\n"
+    )
+
+def compute_signal_and_exits(side: str, price: float):
+    kl = get_klines(ENTRY_INTERVAL, KLINE_LIMIT)
+    if len(kl) < max(120, EMA_SLOW * 3):
+        ef = es = price
+        r = 50.0
+        a = price * 0.005
+        mp = mode_params()
+        score = 50
+        trend_ok = True
+        enter_ok = score >= mp["enter_score"]
+        stop_dist = a * mp["stop_atr"]
+        tp_dist = stop_dist * mp["tp_r"]
+        sl = price - stop_dist if side=="LONG" else price + stop_dist
+        tp = price + tp_dist if side=="LONG" else price - tp_dist
+        reason = build_reason(side, price, ef, es, r, a, score, trend_ok, enter_ok) + "- note=kline 부족\n"
+        return False, reason, score, sl, tp, a
+
+    kl = list(reversed(kl))  # newest last
+    closes=[float(x[4]) for x in kl]
+    highs=[float(x[2]) for x in kl]
+    lows =[float(x[3]) for x in kl]
+
+    ef=ema(closes[-EMA_FAST*3:], EMA_FAST)
+    es=ema(closes[-EMA_SLOW*3:], EMA_SLOW)
+    r=rsi(closes, RSI_PERIOD)
+    a=atr(highs, lows, closes, ATR_PERIOD)
+
+    if r is None: r = 50.0
+    if a is None: a = price * 0.005
+
+    score = ai_score(price, ef, es, r, a)
+    mp = mode_params()
+    enter_ok = score >= mp["enter_score"]
+
+    if side == "LONG":
+        trend_ok = (price > es) and (ef > es)
+    else:
+        trend_ok = (price < es) and (ef < es)
+
+    ok = enter_ok and trend_ok
+    reason = build_reason(side, price, ef, es, r, a, score, trend_ok, enter_ok)
+
+    stop_dist = a * mp["stop_atr"]
+    tp_dist = stop_dist * mp["tp_r"]
+    if side == "LONG":
+        sl = price - stop_dist
+        tp = price + tp_dist
+    else:
+        sl = price + stop_dist
+        tp = price - tp_dist
+
+    return ok, reason, score, sl, tp, a
+
+# =========================
+# PnL estimate (fee + slippage)
+# =========================
+def _est_round_trip_cost_frac():
+    # fee both sides + slippage both sides
+    slip = (SLIPPAGE_BPS / 10000.0)
+    return (2 * FEE_RATE) + (2 * slip)
+
+def estimate_pnl_usdt(side: str, entry_price: float, exit_price: float, notional_usdt: float):
+    # price move fraction
+    if entry_price <= 0 or notional_usdt <= 0:
+        return 0.0
+    raw_move = (exit_price - entry_price) / entry_price
+    if side == "SHORT":
+        raw_move = -raw_move
+    gross = notional_usdt * raw_move
+    cost = notional_usdt * _est_round_trip_cost_frac()
+    return gross - cost
+
+# =========================
+# TRADER
+# =========================
+class Trader:
+    def __init__(self, state=None):
+        self.state = state if isinstance(state, dict) else {}
+        self.trading_enabled = True
+
+        self.position=None     # "LONG"/"SHORT"
+        self.entry_price=None
+        self.entry_ts=None
+
+        self.stop_price=None
+        self.tp_price=None
+        self.trail_price=None
+
+        # partial TP state
+        self.tp1_price=None
+        self.tp1_done=False
+        self.qty_est=None  # for DRY_RUN bookkeeping only
+
+        # stats
+        self.win=0
+        self.loss=0
+        self.day_profit=0.0
+        self.consec_losses=0
+        self._day_key=None
+        self._day_entries=0
+
+        self._cooldown_until=0
+        self._last_alert_ts=0
+        self._last_err_ts=0
+        self._lev_set_for_mode=None
+
+        # last used params for pnl estimate
+        self._last_order_usdt=None
+        self._last_lev=None
+
+    # ---- notify ----
+    def notify(self, msg):
+        print(msg)
+        if BOT_TOKEN and CHAT_ID:
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    data={"chat_id": CHAT_ID, "text": msg},
+                    timeout=10
+                )
+            except Exception:
+                pass
+
+    def notify_throttled(self, msg, min_sec=None):
+        cooldown = min_sec if min_sec is not None else ALERT_COOLDOWN_SEC
+        if time.time() - self._last_alert_ts >= cooldown:
+            self._last_alert_ts = time.time()
+            self.notify(msg)
+
+    def err_throttled(self, msg):
+        if time.time() - self._last_err_ts >= max(ALERT_COOLDOWN_SEC, 120):
+            self._last_err_ts = time.time()
+            self.notify(msg)
+
+    def _reset_day(self):
+        dk = _day_key_utc()
+        if self._day_key != dk:
+            self._day_key = dk
+            self._day_entries = 0
+            self.day_profit = 0.0
+            self.win = 0
+            self.loss = 0
+            self.consec_losses = 0
+
+    def _sync_real_position(self):
+        if DRY_RUN:
+            return
+        p = get_position()
+        if p.get("has_pos"):
+            side = p.get("side")
+            self.position = "LONG" if side == "Buy" else "SHORT"
+            self.entry_price = float(p.get("avgPrice") or self.entry_price or 0.0)
+            if not self.entry_ts:
+                self.entry_ts = time.time()
+        else:
+            self.position = None
+            self.entry_price = None
+            self.entry_ts = None
+            self.stop_price = None
+            self.tp_price = None
+            self.trail_price = None
+            self.tp1_price = None
+            self.tp1_done = False
+            self.qty_est = None
+
+    # ===== Telegram commands =====
+    def handle_command(self, text: str):
+        cmd = (text or "").strip()
+
+        if cmd == "/start":
+            self.trading_enabled = True
+            self.notify("✅ 거래 ON")
+            return
+
+        if cmd == "/stop":
+            self.trading_enabled = False
+            self.notify("🛑 거래 OFF")
+            return
+
+        if cmd == "/safe":
+            os.environ["MODE"] = "SAFE"
+            self._lev_set_for_mode = None
+            self.notify("🛡 SAFE 모드로 전환")
+            return
+
+        if cmd in ("/aggro", "/attack"):
+            os.environ["MODE"] = "AGGRO"
+            self._lev_set_for_mode = None
+            self.notify("⚔️ AGGRO 모드로 전환")
+            return
+
+        if cmd == "/status":
+            self.notify(self.status_text())
+            return
+
+        if cmd == "/buy":
+            self.manual_enter("LONG")
+            return
+
+        if cmd == "/short":
+            self.manual_enter("SHORT")
+            return
+
+        if cmd == "/sell":
+            self.manual_exit("MANUAL SELL")
+            return
+
+        if cmd == "/panic":
+            self.manual_exit("PANIC", force=True)
+            self.trading_enabled = False
+            self.notify("🚨 PANIC: 청산 시도 + 거래 OFF")
+            return
+
+        if cmd in ("/help", "help"):
+            self.notify(self.help_text())
+            return
+
+        if cmd.startswith("/"):
+            self.notify("❓ 모르는 명령. /help")
+            return
+
+    def help_text(self):
+        return (
+            "📌 명령어\n"
+            "/start /stop\n"
+            "/safe /aggro(= /attack)\n"
+            "/status\n"
+            "/buy (롱 수동)\n"
+            "/short (숏 수동)\n"
+            "/sell (청산)\n"
+            "/panic (강제청산+OFF)\n"
+        )
+
+    def status_text(self):
+        total = self.win + self.loss
+        winrate = (self.win / total * 100) if total else 0.0
+        mp = mode_params()
+        lines = []
+        lines.append(f"🧠 DRY_RUN={DRY_RUN} | ON={self.trading_enabled} | MODE={os.getenv('MODE','SAFE')}")
+        lines.append(f"⚙️ lev={mp['lev']} | order_usdt={mp['order_usdt']} | enter_score>={mp['enter_score']}")
+        lines.append(f"⏰ entry_hours_utc={TRADE_HOURS_UTC} | allowed_now={entry_allowed_now_utc()}")
+        lines.append(f"💸 fee={FEE_RATE:.4%}/side | slip={SLIPPAGE_BPS:.1f}bps/side | partialTP={PARTIAL_TP_ON}({PARTIAL_TP_PCT:.0%})")
+        lines.append(f"🌐 base={BYBIT_BASE_URL} | proxy={'ON' if PROXIES else 'OFF'}")
+        if self.state.get("last_price") is not None:
+            lines.append(f"💵 price={self.state.get('last_price'):.2f}")
+        lines.append(f"📍 POS={self.position or 'None'} entry={self.entry_price}")
+        if self.stop_price and self.tp_price:
+            lines.append(f"🎯 stop={self.stop_price:.2f} | tp={self.tp_price:.2f} | tp1={self.tp1_price} | trail={self.trail_price}")
+        lines.append(f"📈 day_profit≈{self.day_profit:.2f} | winrate={winrate:.1f}% (W{self.win}/L{self.loss}) | consec_losses={self.consec_losses}")
+        if self.state.get("entry_reason"):
+            lines.append(f"🧠 근거:\n{self.state.get('entry_reason')}")
+        if self.state.get("last_event"):
+            lines.append(f"📝 last={self.state.get('last_event')}")
+        return "\n".join(lines)
+
+    # ===== Orders =====
+    def _ensure_leverage(self):
+        mp = mode_params()
+        m = os.getenv("MODE", MODE).upper()
+        if self._lev_set_for_mode != m and not DRY_RUN:
+            set_leverage(int(mp["lev"]))
+            self._lev_set_for_mode = m
+
+    def _enter(self, side: str, price: float, reason: str, sl: float, tp: float, atr_val: float):
+        mp = mode_params()
+        lev = mp["lev"]
+        order_usdt = mp["order_usdt"]
+        qty = qty_from_order_usdt(order_usdt, lev, price)
+        if qty <= 0:
+            raise Exception("qty<=0")
+
+        # remember for pnl estimate
+        self._last_order_usdt = float(order_usdt)
+        self._last_lev = float(lev)
+
+        if not DRY_RUN:
+            order_market("Buy" if side == "LONG" else "Sell", qty)
+
+        self.position = side
+        self.entry_price = price
+        self.entry_ts = time.time()
+        self.stop_price = sl
+        self.tp_price = tp
+        self.trail_price = None
+
+        # partial TP target
+        self.tp1_done = False
+        if PARTIAL_TP_ON:
+            if side == "LONG":
+                self.tp1_price = price + (tp - price) * TP1_FRACTION
+            else:
+                self.tp1_price = price - (price - tp) * TP1_FRACTION
+        else:
+            self.tp1_price = None
+
+        self._cooldown_until = time.time() + COOLDOWN_SEC
+        self._day_entries += 1
+        self.state["entry_reason"] = reason
+
+        self.notify(f"✅ ENTER {side} qty={qty}\n{reason}\n⏳ stop={sl:.2f} tp={tp:.2f} tp1={self.tp1_price}")
+
+    def manual_enter(self, side: str):
+        try:
+            self._reset_day()
+            self._sync_real_position()
+            if self.position:
+                self.notify("⚠️ 이미 포지션 있음")
+                return
+
+            price = get_price()
+            self._ensure_leverage()
+
+            ok, reason, score, sl, tp, a = compute_signal_and_exits(side, price)
+            self._enter(side, price, reason + "- manual=True\n", sl, tp, a)
+
+        except Exception as e:
+            self.err_throttled(f"❌ manual enter 실패: {e}")
+
+    def _close_qty(self, close_qty: float, side: str):
+        # side here is current position side ("LONG"/"SHORT")
+        if DRY_RUN:
+            return
+        if close_qty <= 0:
+            return
+        order_market("Sell" if side == "LONG" else "Buy", close_qty, reduce_only=True)
+
+    def manual_exit(self, why: str, force=False):
+        try:
+            self._sync_real_position()
+            if not self.position and not force:
+                self.notify("⚠️ 포지션 없음")
+                return
+
+            price = get_price()
+
+            # close all
+            if not DRY_RUN and self.position:
+                p = get_position()
+                qty = float(p.get("size") or 0.0)
+                if qty > 0:
+                    self._close_qty(qty, self.position)
+
+            # PnL estimate using notional = order_usdt * lev (approx)
+            if self.entry_price and self.position:
+                notional = float(self._last_order_usdt or 0) * float(self._last_lev or 0)
+                pnl_est = estimate_pnl_usdt(self.position, self.entry_price, price, notional)
+                self.day_profit += pnl_est
+                if pnl_est >= 0:
+                    self.win += 1
+                    self.consec_losses = 0
+                else:
+                    self.loss += 1
+                    self.consec_losses += 1
+
+            self.notify(f"✅ EXIT({why}) price={price:.2f} day_profit≈{self.day_profit:.2f} (W{self.win}/L{self.loss})")
+
+            self.position = None
+            self.entry_price = None
+            self.entry_ts = None
+            self.stop_price = None
+            self.tp_price = None
+            self.trail_price = None
+            self.tp1_price = None
+            self.tp1_done = False
+
+            self._cooldown_until = time.time() + COOLDOWN_SEC
+
+        except Exception as e:
+            self.err_throttled(f"❌ manual exit 실패: {e}")
+
+    # =========================
+    # Main tick
+    # =========================
+    def tick(self):
+        self._reset_day()
+
+        self.state["trading_enabled"] = self.trading_enabled
+        self.state["mode"] = os.getenv("MODE", "SAFE")
+        self.state["bybit_base"] = BYBIT_BASE_URL
+        self.state["proxy"] = "ON" if PROXIES else "OFF"
+
+        if not self.trading_enabled:
+            self.state["last_event"] = "거래 OFF"
+            return
+
+        if self.consec_losses >= MAX_CONSEC_LOSSES:
+            self.notify_throttled("🛑 연속 손실 제한 도달. 거래 중지")
+            self.trading_enabled = False
+            self.state["last_event"] = "STOP: consec losses"
+            return
+
+        # price
+        try:
+            price = get_price()
+            self.state["last_price"] = price
+        except Exception as e:
+            self.err_throttled(f"❌ price 실패: {e}")
+            return
+
+        # sync real position
+        try:
+            self._sync_real_position()
+        except Exception as e:
+            self.err_throttled(f"❌ position sync 실패: {e}")
+
+        # ================= ENTRY =================
+        if not self.position:
+            if time.time() < self._cooldown_until:
+                self.state["last_event"] = "대기: cooldown"
+                return
+            if self._day_entries >= MAX_ENTRIES_PER_DAY:
+                self.state["last_event"] = "대기: 일일 진입 제한"
+                return
+
+            # time filter (ENTRY only)
+            if not entry_allowed_now_utc():
+                self.state["last_event"] = f"대기: 시간필터(UTC {TRADE_HOURS_UTC})"
+                return
+
+            try:
+                self._ensure_leverage()
+            except Exception as e:
+                self.err_throttled(f"❌ leverage 설정 실패: {e}")
+                return
+
+            best = None
+            if ALLOW_LONG:
+                ok, reason, score, sl, tp, a = compute_signal_and_exits("LONG", price)
+                best = ("LONG", ok, reason, score, sl, tp, a)
+            if ALLOW_SHORT:
+                ok2, reason2, score2, sl2, tp2, a2 = compute_signal_and_exits("SHORT", price)
+                if (best is None) or (score2 > best[3]):
+                    best = ("SHORT", ok2, reason2, score2, sl2, tp2, a2)
+
+            if best is None:
+                self.state["last_event"] = "대기: 방향 없음"
+                return
+
+            side, ok, reason, score, sl, tp, a = best
+            self.state["entry_reason"] = reason
+
+            if not ok:
+                self.state["last_event"] = f"대기: score={score}"
+                return
+
+            try:
+                self._enter(side, price, reason, sl, tp, a)
+                self.state["last_event"] = f"ENTER {side}"
+            except Exception as e:
+                self.err_throttled(f"❌ entry 실패: {e}")
+            return
+
+        # ================= EXIT / MANAGE =================
+        side = self.position
+        ok, reason, score, sl_new, tp_new, a = compute_signal_and_exits(side, price)
+
+        # trailing
+        if TRAIL_ON and a is not None:
+            dist = a * TRAIL_ATR_MULT
+            if side == "LONG":
+                cand = price - dist
+                if self.trail_price is None or cand > self.trail_price:
+                    self.trail_price = cand
+            else:
+                cand = price + dist
+                if self.trail_price is None or cand < self.trail_price:
+                    self.trail_price = cand
+
+        eff_stop = self.stop_price
+        if self.trail_price is not None:
+            if side == "LONG":
+                eff_stop = max(eff_stop, self.trail_price)
+            else:
+                eff_stop = min(eff_stop, self.trail_price)
+
+        # time exit
+        if self.entry_ts and (time.time() - self.entry_ts) > (TIME_EXIT_MIN * 60):
+            self.manual_exit("TIME EXIT")
+            return
+
+        # score drop exit
+        if score <= EXIT_SCORE_DROP:
+            self.manual_exit(f"SCORE DROP {score}")
+            return
+
+        # PARTIAL TP
+        if PARTIAL_TP_ON and (not self.tp1_done) and self.tp1_price is not None and (not DRY_RUN):
+            try:
+                p = get_position()
+                qty_total = float(p.get("size") or 0.0)
+                if qty_total > 0:
+                    hit_tp1 = (price >= self.tp1_price) if side=="LONG" else (price <= self.tp1_price)
+                    if hit_tp1:
+                        close_qty = qty_total * float(PARTIAL_TP_PCT)
+                        self._close_qty(close_qty, side)
+                        self.tp1_done = True
+                        if MOVE_STOP_TO_BE_ON_TP1 and self.entry_price is not None:
+                            if side == "LONG":
+                                self.stop_price = max(self.stop_price, self.entry_price)
+                            else:
+                                self.stop_price = min(self.stop_price, self.entry_price)
+                        self.notify(f"🧩 PARTIAL TP hit: closed {PARTIAL_TP_PCT:.0%} @ {price:.2f} | stop-> {self.stop_price:.2f}")
+            except Exception as e:
+                self.err_throttled(f"❌ partial TP 실패: {e}")
+
+        # SL/TP
+        if side == "LONG":
+            if price <= eff_stop:
+                self.manual_exit("STOP/TRAIL")
+                return
+            if price >= self.tp_price:
+                self.manual_exit("TAKE PROFIT")
+                return
+        else:
+            if price >= eff_stop:
+                self.manual_exit("STOP/TRAIL")
+                return
+            if price <= self.tp_price:
+                self.manual_exit("TAKE PROFIT")
+                return
+
+        self.state["last_event"] = f"HOLD {side} score={score} stop={eff_stop:.2f} tp={self.tp_price:.2f}"
+
+    def public_state(self):
+        return {
+            "dry_run": DRY_RUN,
+            "mode": os.getenv("MODE","SAFE"),
+            "trading_enabled": self.trading_enabled,
+            "position": self.position,
+            "entry_price": self.entry_price,
+            "stop_price": self.stop_price,
+            "tp_price": self.tp_price,
+            "tp1_price": self.tp1_price,
+            "tp1_done": self.tp1_done,
+            "trail_price": self.trail_price,
+            "day_profit_approx": self.day_profit,
+            "win": self.win,
+            "loss": self.loss,
+            "consec_losses": self.consec_losses,
+            "day_entries": self._day_entries,
+            "cooldown_until": self._cooldown_until,
+            "entry_reason": self.state.get("entry_reason"),
+            "last_event": self.state.get("last_event"),
+            "last_price": self.state.get("last_price"),
+            "bybit_base": BYBIT_BASE_URL,
+            "proxy": "ON" if PROXIES else "OFF",
+            "fee_rate": FEE_RATE,
+            "slippage_bps": SLIPPAGE_BPS,
+            "trade_hours_utc": TRADE_HOURS_UTC,
+        }
