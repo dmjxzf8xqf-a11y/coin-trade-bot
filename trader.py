@@ -1,3 +1,4 @@
+# trader.py (FULL COPY-PASTE)
 import os
 import time
 import json
@@ -11,21 +12,21 @@ from config import *
 # ✅ CloudFront/WAF 회피용 기본 헤더
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
-# ✅ Proxy (Render 환경변수에 HTTPS_PROXY/HTTP_PROXY 넣으면 적용)
+# ✅ Proxy (Render/Railway 환경변수에 HTTPS_PROXY/HTTP_PROXY 넣으면 적용)
 PROXY = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or ""
 PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
 
-# ✅ Bybit 차단 회피 도메인 강제 치환
-#    (config.py가 api.bybit.com 이어도 여기서 bytick으로 바꿈)
+# ✅ Bybit base URL
+# - 이전 코드처럼 강제로 bytick으로 바꾸면 403(국가차단) 날 수 있음
+# - 필요하면 Railway 환경변수 BYBIT_BASE_URL 로 직접 지정
 try:
-    BYBIT_BASE_URL = (BYBIT_BASE_URL or "").strip()
+    BYBIT_BASE_URL = (os.getenv("BYBIT_BASE_URL") or BYBIT_BASE_URL or "").strip()
 except:
     BYBIT_BASE_URL = "https://api.bybit.com"
 
-if "api.bybit.com" in BYBIT_BASE_URL:
-    BYBIT_BASE_URL = BYBIT_BASE_URL.replace("https://api.bybit.com", "https://api.bytick.com").replace(
-        "http://api.bybit.com", "https://api.bytick.com"
-    )
+if not BYBIT_BASE_URL:
+    BYBIT_BASE_URL = "https://api.bybit.com"
+BYBIT_BASE_URL = BYBIT_BASE_URL.rstrip("/")
 
 # -------------------------
 # 안전하게 config 기본값 제공
@@ -38,7 +39,9 @@ def _cfg(name, default):
     except Exception:
         return default
 
-# 전략 파라미터(안정형 기본)
+# =========================
+# 전략/거래 파라미터
+# =========================
 ENTRY_INTERVAL = str(_cfg("ENTRY_INTERVAL", "15"))
 KLINE_LIMIT = int(_cfg("KLINE_LIMIT", 240))
 EMA_FAST = int(_cfg("EMA_FAST", 20))
@@ -57,16 +60,23 @@ TP_R_MULT = float(_cfg("TP_R_MULT", 1.5))
 COOLDOWN_SEC = int(_cfg("COOLDOWN_SEC", 60 * 20))
 MAX_ENTRIES_PER_DAY = int(_cfg("MAX_ENTRIES_PER_DAY", 6))
 
-MIN_QTY = float(_cfg("MIN_QTY", 0.0001))
+# ✅ 주문 크기 (USDT 기준) : 30USDT 계좌면 5~10 정도가 현실적
+ORDER_USDT = float(os.getenv("ORDER_USDT", str(_cfg("ORDER_USDT", 6.0))))
 
+# ✅ 최소 주문(안전 fallback)
+MIN_QTY_FALLBACK = float(_cfg("MIN_QTY", 0.0001))
+MIN_NOTIONAL_USDT_FALLBACK = float(_cfg("MIN_NOTIONAL_USDT", 5.0))  # 보수적 기본
 
+# =========================
+# Trader
+# =========================
 class Trader:
     def __init__(self, state):
         self.state = state
 
         self.trading_enabled = _cfg("TRADING_ENABLED_DEFAULT", True)
-        self.leverage = int(_cfg("LEVERAGE_DEFAULT", 3))
-        self.risk_pct = float(_cfg("RISK_PCT_DEFAULT", 0.10))
+        self.leverage = int(_cfg("LEVERAGE_DEFAULT", 5))
+        self.risk_pct = float(_cfg("RISK_PCT_DEFAULT", 0.20))
 
         self.position = None
         self.entry_price = None
@@ -80,6 +90,10 @@ class Trader:
 
         self._last_alert_ts = 0
         self._last_bybit_err_ts = 0
+
+        # instrument rules cache
+        self._rules_cache = None
+        self._rules_cache_ts = 0
 
     # ---------- Telegram ----------
     def tg_send(self, msg):
@@ -155,16 +169,19 @@ class Trader:
 
         h, b = self._sign_post(body)
         url = BYBIT_BASE_URL + path
-
         r = requests.post(url, headers=h, data=b, timeout=15, proxies=PROXIES)
         data = self._safe_json(r)
 
         if r.status_code == 403:
-            raise Exception(f"Bybit 403 blocked. base={BYBIT_BASE_URL} proxy={'ON' if PROXIES else 'OFF'} raw={data.get('raw')}")
+            raise Exception(
+                f"Bybit 403 blocked. base={BYBIT_BASE_URL} proxy={'ON' if PROXIES else 'OFF'} raw={data.get('raw')}"
+            )
         if r.status_code == 407:
             raise Exception("Proxy auth failed (407). 프록시 아이디/비번 확인")
         if data.get("_non_json"):
-            raise Exception(f"Bybit non-JSON status={data.get('status')} proxy={'ON' if PROXIES else 'OFF'} raw={data.get('raw')}")
+            raise Exception(
+                f"Bybit non-JSON status={data.get('status')} proxy={'ON' if PROXIES else 'OFF'} raw={data.get('raw')}"
+            )
         return data
 
     def _bybit_get(self, path: str, params: dict):
@@ -173,16 +190,19 @@ class Trader:
 
         h, query = self._sign_get(params)
         url = BYBIT_BASE_URL + path + ("?" + query if query else "")
-
         r = requests.get(url, headers=h, timeout=15, proxies=PROXIES)
         data = self._safe_json(r)
 
         if r.status_code == 403:
-            raise Exception(f"Bybit 403 blocked. base={BYBIT_BASE_URL} proxy={'ON' if PROXIES else 'OFF'} raw={data.get('raw')}")
+            raise Exception(
+                f"Bybit 403 blocked. base={BYBIT_BASE_URL} proxy={'ON' if PROXIES else 'OFF'} raw={data.get('raw')}"
+            )
         if r.status_code == 407:
             raise Exception("Proxy auth failed (407). 프록시 아이디/비번 확인")
         if data.get("_non_json"):
-            raise Exception(f"Bybit non-JSON status={data.get('status')} proxy={'ON' if PROXIES else 'OFF'} raw={data.get('raw')}")
+            raise Exception(
+                f"Bybit non-JSON status={data.get('status')} proxy={'ON' if PROXIES else 'OFF'} raw={data.get('raw')}"
+            )
         return data
 
     # ---------- market data ----------
@@ -200,15 +220,41 @@ class Trader:
     def get_klines(self, interval=None, limit=None):
         interval = str(interval or ENTRY_INTERVAL)
         limit = int(limit or KLINE_LIMIT)
-        res = self._bybit_get("/v5/market/kline", {
-            "category": CATEGORY,
-            "symbol": SYMBOL,
-            "interval": interval,
-            "limit": limit
-        })
+        res = self._bybit_get(
+            "/v5/market/kline",
+            {"category": CATEGORY, "symbol": SYMBOL, "interval": interval, "limit": limit},
+        )
         if res.get("retCode") != 0:
             raise Exception(f"kline retCode={res.get('retCode')} retMsg={res.get('retMsg')}")
         return (res.get("result") or {}).get("list") or []
+
+    # ---------- instruments info (min qty/step) ----------
+    def get_instrument_rules(self, force=False):
+        # 캐시 10분
+        if (not force) and self._rules_cache and (time.time() - self._rules_cache_ts < 600):
+            return self._rules_cache
+
+        res = self._bybit_get("/v5/market/instruments-info", {"category": CATEGORY, "symbol": SYMBOL})
+        if res.get("retCode") != 0:
+            raise Exception(f"instruments-info retCode={res.get('retCode')} retMsg={res.get('retMsg')}")
+
+        items = (((res.get("result") or {}).get("list")) or [])
+        if not items:
+            raise Exception("instruments-info empty")
+
+        it = items[0]
+        lot = it.get("lotSizeFilter") or {}
+        min_qty = float(lot.get("minOrderQty") or MIN_QTY_FALLBACK)
+        qty_step = float(lot.get("qtyStep") or MIN_QTY_FALLBACK)
+
+        self._rules_cache = {"min_qty": min_qty, "qty_step": qty_step}
+        self._rules_cache_ts = time.time()
+        return self._rules_cache
+
+    def _floor_to_step(self, x: float, step: float):
+        if step <= 0:
+            return x
+        return math.floor(x / step) * step
 
     # ---------- indicators ----------
     def _ema(self, values, period):
@@ -313,18 +359,40 @@ class Trader:
         res = self._bybit_post("/v5/position/set-leverage", body)
         self.tg_send(f"⚙️ 레버리지 {self.leverage}x 설정: {res.get('retMsg')} ({res.get('retCode')})")
 
-    # ---------- sizing ----------
-    def calc_qty_by_risk(self, usdt_balance: float, price: float, stop_dist: float):
-        risk_usdt = max(usdt_balance * self.risk_pct, 0.0)
-        if stop_dist <= 0:
-            return MIN_QTY
+    # ---------- sizing (USDT 기준) ----------
+    def calc_qty_by_usdt(self, usdt_balance: float, price: float):
+        """
+        ORDER_USDT(예: 6) 만큼을 증거금으로 쓰고 레버리지 적용한 notional로 qty 계산.
+        최소수량/스텝 자동 맞춤.
+        """
+        rules = self.get_instrument_rules()
+        min_qty = float(rules.get("min_qty") or MIN_QTY_FALLBACK)
+        step = float(rules.get("qty_step") or MIN_QTY_FALLBACK)
 
-        qty_risk = risk_usdt / stop_dist
-        max_qty_by_lev = (usdt_balance * max(self.leverage, 1)) / max(price, 1e-12)
+        # 사용할 증거금: ORDER_USDT (잔고보다 크면 잔고 일부만)
+        margin = min(max(ORDER_USDT, 0.0), max(usdt_balance, 0.0))
 
-        qty = min(qty_risk, max_qty_by_lev)
-        qty = max(qty, MIN_QTY)
-        return float(f"{qty:.6f}")
+        # 너무 작은 주문금액이면 패스 (거래소 최소 notional은 심볼/계정마다 달라서 보수적으로)
+        if margin < MIN_NOTIONAL_USDT_FALLBACK:
+            return 0.0, f"잔고/주문금액 너무 작음: margin={margin:.2f} < {MIN_NOTIONAL_USDT_FALLBACK}"
+
+        notional = margin * max(self.leverage, 1)
+        qty = notional / max(price, 1e-12)
+
+        # step 내림
+        qty = self._floor_to_step(qty, step)
+
+        # 최소수량 보정
+        if qty < min_qty:
+            # min_qty로 올려보고, 그때 필요한 증거금이 잔고 내인지 체크
+            need_notional = min_qty * price
+            need_margin = need_notional / max(self.leverage, 1)
+            if need_margin > usdt_balance:
+                return 0.0, f"최소수량 충족 불가: need_margin≈{need_margin:.2f} > balance={usdt_balance:.2f}"
+            qty = min_qty
+            qty = self._floor_to_step(qty, step)
+
+        return float(f"{qty:.6f}"), f"qty OK (min={min_qty}, step={step})"
 
     # ---------- anti-overtrade ----------
     def _update_day_counter(self):
@@ -341,12 +409,12 @@ class Trader:
 
         kl = list(reversed(kl))
         closes = [float(x[4]) for x in kl]
-        highs  = [float(x[2]) for x in kl]
-        lows   = [float(x[3]) for x in kl]
+        highs = [float(x[2]) for x in kl]
+        lows = [float(x[3]) for x in kl]
 
         price = closes[-1]
-        ema20 = self._ema(closes[-(EMA_FAST*6):], EMA_FAST)
-        ema50 = self._ema(closes[-(EMA_SLOW*6):], EMA_SLOW)
+        ema20 = self._ema(closes[-(EMA_FAST * 6):], EMA_FAST)
+        ema50 = self._ema(closes[-(EMA_SLOW * 6):], EMA_SLOW)
         rsi = self._rsi(closes, RSI_PERIOD)
         atr = self._atr(highs, lows, closes, ATR_PERIOD)
 
@@ -393,7 +461,7 @@ class Trader:
     def status_text(self):
         lines = []
         lines.append(f"🧠 DRY_RUN={_cfg('DRY_RUN', True)} | ON={self.trading_enabled}")
-        lines.append(f"⚙️ lev={self.leverage} | risk={self.risk_pct}")
+        lines.append(f"⚙️ lev={self.leverage} | risk={self.risk_pct} | ORDER_USDT={ORDER_USDT}")
         lines.append(f"🌐 bybit_base={BYBIT_BASE_URL} | proxy={'ON' if PROXIES else 'OFF'}")
         if self.state.get("last_price") is not None:
             lines.append(f"💵 price={self.state.get('last_price'):.2f}")
@@ -461,13 +529,11 @@ class Trader:
             try:
                 price = self.get_last_price_bybit()
                 bal = self.get_usdt_balance()
-                out = self.should_enter_long()
-                if out[0] and len(out) >= 4:
-                    _, reason, stop_dist, _ = out
-                else:
-                    stop_dist = max(price * 0.005, 1.0)
-                    reason = "MANUAL: fallback stop"
-                qty = self.calc_qty_by_risk(bal, price, stop_dist)
+
+                qty, why = self.calc_qty_by_usdt(bal, price)
+                if qty <= 0:
+                    self.tg_send(f"❌ 주문불가: {why}")
+                    return
 
                 if not self.lev_set:
                     self.set_leverage()
@@ -478,7 +544,7 @@ class Trader:
                 self.entry_price = price
                 self.entry_ts = time.time()
                 self._cooldown_until = time.time() + COOLDOWN_SEC
-                self.tg_send(f"📈 수동 LONG: {price:.2f} / qty={qty}\n🧠 참고: {reason}")
+                self.tg_send(f"📈 수동 LONG: {price:.2f} / qty={qty}\n✅ {why}")
             except Exception as e:
                 self.tg_send_bybit_err_throttled(f"❌ /buy 실패: {e}")
             return
@@ -489,7 +555,11 @@ class Trader:
                 self.tg_send("⚠️ 포지션 없음")
                 return
             try:
-                qty = max(MIN_QTY, float(self.state.get("last_qty") or MIN_QTY))
+                p = self.get_position_info()
+                qty = float(p.get("size") or 0.0)
+                if qty <= 0:
+                    self.tg_send("⚠️ 실제 포지션 size=0")
+                    return
                 self.order_market("Sell", qty, reduce_only=True)
                 self.position = None
                 self.entry_price = None
@@ -501,8 +571,10 @@ class Trader:
 
         if cmd == "/panic":
             try:
-                qty = max(MIN_QTY, float(self.state.get("last_qty") or MIN_QTY))
-                self.order_market("Sell", qty, reduce_only=True)
+                p = self.get_position_info()
+                qty = float(p.get("size") or 0.0)
+                if qty > 0:
+                    self.order_market("Sell", qty, reduce_only=True)
             except Exception as e:
                 self.tg_send_bybit_err_throttled(f"❌ /panic 실패: {e}")
                 return
@@ -516,17 +588,6 @@ class Trader:
         if cmd.startswith("/"):
             self.tg_send("❓ 명령을 모르겠음. /help")
             return
-
-    # ---------- leverage ----------
-    def set_leverage(self):
-        body = {
-            "category": CATEGORY,
-            "symbol": SYMBOL,
-            "buyLeverage": str(self.leverage),
-            "sellLeverage": str(self.leverage),
-        }
-        res = self._bybit_post("/v5/position/set-leverage", body)
-        self.tg_send(f"⚙️ 레버리지 {self.leverage}x 설정: {res.get('retMsg')} ({res.get('retCode')})")
 
     # ---------- order ----------
     def order_market(self, side: str, qty: float, reduce_only=False):
@@ -556,6 +617,7 @@ class Trader:
         self.state["risk_pct"] = self.risk_pct
         self.state["bybit_base"] = BYBIT_BASE_URL
         self.state["proxy"] = "ON" if PROXIES else "OFF"
+        self.state["order_usdt"] = ORDER_USDT
 
         if not self.trading_enabled:
             self.state["last_event"] = "거래 OFF"
@@ -594,6 +656,7 @@ class Trader:
 
         self.state["usdt_balance"] = usdt_balance
 
+        # 진입 로직
         if self.position is None and self.entry_price is None:
             if time.time() < self._cooldown_until:
                 self.state["last_event"] = "대기: cooldown"
@@ -613,7 +676,11 @@ class Trader:
                 _, reason, stop_dist, tp_dist = out
                 self.state["entry_reason"] = reason
 
-                qty = self.calc_qty_by_risk(usdt_balance, price, stop_dist)
+                qty, why = self.calc_qty_by_usdt(usdt_balance, price)
+                if qty <= 0:
+                    self.state["last_event"] = "대기: " + why
+                    return
+
                 self.state["last_qty"] = qty
                 self.state["stop_dist"] = stop_dist
                 self.state["tp_dist"] = tp_dist
@@ -627,7 +694,7 @@ class Trader:
                     self._day_entries += 1
                     self._cooldown_until = time.time() + COOLDOWN_SEC
 
-                    self.tg_send(f"📈 LONG 진입: {price:.2f} / qty={qty}\n🧠 근거: {reason}")
+                    self.tg_send(f"📈 LONG 진입: {price:.2f} / qty={qty}\n🧠 근거: {reason}\n✅ {why}")
                 except Exception as e:
                     self.position = None
                     self.entry_price = None
@@ -639,10 +706,18 @@ class Trader:
                 self.tg_send_bybit_err_throttled(f"❌ 진입 판단 실패: {e}")
                 return
 
+        # 관리 로직 (ATR 기반)
         if self.position == "LONG" and self.entry_price:
             stop_dist = float(self.state.get("stop_dist") or 0.0)
             tp_dist = float(self.state.get("tp_dist") or 0.0)
-            qty = float(self.state.get("last_qty") or MIN_QTY)
+
+            p = None
+            try:
+                p = self.get_position_info()
+            except:
+                p = None
+
+            qty = float((p or {}).get("size") or self.state.get("last_qty") or MIN_QTY_FALLBACK)
 
             if stop_dist <= 0:
                 stop_dist = max(self.entry_price * 0.005, 1.0)
@@ -688,6 +763,7 @@ class Trader:
             "risk_pct": self.risk_pct,
             "bybit_base": BYBIT_BASE_URL,
             "proxy": "ON" if PROXIES else "OFF",
+            "order_usdt": ORDER_USDT,
             "price": self.state.get("last_price"),
             "position": self.position,
             "entry_price": self.entry_price,
