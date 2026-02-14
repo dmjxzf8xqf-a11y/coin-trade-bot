@@ -19,7 +19,7 @@ BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 BYBIT_BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com").rstrip("/")
 
-SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
+SYMBOL = os.getenv("SYMBOL", "ETHUSDT")
 CATEGORY = os.getenv("CATEGORY", "linear")          # USDT 선물 = linear
 ACCOUNT_TYPE = os.getenv("ACCOUNT_TYPE", "UNIFIED") # UNIFIED or CONTRACT
 
