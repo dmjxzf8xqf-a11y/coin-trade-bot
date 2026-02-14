@@ -261,10 +261,24 @@ def set_leverage(x: int):
     return bybit_post("/v5/position/set-leverage", body)
 
 def order_market(side: str, qty: float, reduce_only=False):
-    body = {"category": CATEGORY, "symbol": SYMBOL, "side": side, "orderType": "Market", "qty": str(qty), "timeInForce": "IOC"}
+    body = {
+        "category": CATEGORY,
+        "symbol": SYMBOL,
+        "side": side,
+        "orderType": "Market",
+        "qty": str(qty),
+        "timeInForce": "IOC",
+    }
     if reduce_only:
         body["reduceOnly"] = True
-    return bybit_post("/v5/order/create", body)
+
+    resp = bybit_post("/v5/order/create", body)
+
+    # ✅ 실패면 여기서 멈춤 + 이유를 텔레그램/로그로 올리게 됨
+    if (resp or {}).get("retCode") != 0:
+        raise Exception(f"ORDER FAILED → retCode={resp.get('retCode')} retMsg={resp.get('retMsg')}")
+
+    return resp
 
 def qty_from_order_usdt(order_usdt, lev, price):
     if order_usdt <= 0 or price <= 0:
