@@ -46,7 +46,13 @@ import math
 import time
 import math
 import time
-
+# ===== qty step 보정 =====
+def fix_qty(qty):
+    try:
+        step = 1000   # 밈코인 기본 단위
+        return max(step, int(qty // step * step))
+    except Exception:
+        return qty
 def _to_float(x, default=0.0):
     try:
         return float(x)
