@@ -672,7 +672,15 @@ def tg_send(msg: str):
             )
         except Exception:
             pass
-
+def _ai_record_pnl(pnl_est: float):
+    """
+    EXIT 시점에만 호출해야 AI winrate가 정확히 누적됨.
+    실패해도 매매 로직은 계속 돌아가게 안전 처리.
+    """
+    try:
+        record_trade_result(float(pnl_est))
+    except Exception:
+        pass
 # =========================
 # Trader
 # =========================
