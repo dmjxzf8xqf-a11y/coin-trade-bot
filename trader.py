@@ -344,6 +344,46 @@ http = BybitHTTP()
 # =========================
 # Indicators
 # =========================
+# ✅ BTC 필터: 추세장(강하게) / 횡보장(약하게)
+def btc_filter(side: str) -> bool:
+    """
+    - BTC가 뚜렷한 추세면: 추세 방향만 허용 (강한 필터)
+    - BTC가 횡보면: 필터 완화(거의 통과) -> 알트 독립장 허용
+    """
+    try:
+        kl = get_klines("BTCUSDT", "60", 260)  # 1시간봉
+        if not kl or len(kl) < 220:
+            return True
+
+        kl = list(reversed(kl))
+        closes = [float(x[4]) for x in kl]
+        price = closes[-1]
+
+        ema50 = ema(closes[-150:], 50)
+        ema200 = ema(closes[-200:], 200)
+
+        # BTC 변동성으로 "횡보/추세" 구분
+        highs = [float(x[2]) for x in kl[-120:]]
+        lows  = [float(x[3]) for x in kl[-120:]]
+        a = atr(highs, lows, closes[-120:], 14)
+        if a is None or price <= 0:
+            return True
+
+        # ✅ 횡보 판정: ATR/price가 낮고, ema50-ema200 차이도 작으면 → 완화
+        atr_ratio = a / price
+        ema_gap = abs(ema50 - ema200) / price
+
+        if atr_ratio < 0.003 and ema_gap < 0.002:
+            return True  # 횡보장: 알트 독립 움직임 허용
+
+        # ✅ 추세장: 방향 일치만 허용
+        if side == "LONG":
+            return (price > ema200) and (ema50 > ema200)
+        else:
+            return (price < ema200) and (ema50 < ema200)
+
+    except Exception:
+        return True
 def ema(data, p):
     k = 2/(p+1)
     e = data[0]
