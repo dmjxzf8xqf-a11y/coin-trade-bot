@@ -32,3 +32,24 @@ MAX_LOSS_PERCENT = float(os.getenv("MAX_LOSS_PERCENT", "0.8"))
 TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", "1.2"))
 CRASH_PROTECT_PERCENT = float(os.getenv("CRASH_PROTECT_PERCENT", "1.5"))
 MAX_CONSEC_LOSSES = int(os.getenv("MAX_CONSEC_LOSSES", "3"))
+# ===== AI GROWTH (faster / logging / scaling) =====
+AI_GROWTH = os.getenv("AI_GROWTH", "true").lower() == "true"
+AI_GROWTH_FAST = os.getenv("AI_GROWTH_FAST", "true").lower() == "true"
+
+# 최근 N번 결과로 더 빠르게 튜닝
+GROWTH_WINDOW = int(os.getenv("GROWTH_WINDOW", "4"))      # 4~6 추천
+GROWTH_EVERY_N = int(os.getenv("GROWTH_EVERY_N", "1"))    # 1이면 매번 exit마다 튜닝
+
+# 민감도(평균 손익이 이 값 아래/위면 튜닝)
+GROWTH_LOSS_THRESHOLD = float(os.getenv("GROWTH_LOSS_THRESHOLD", "-0.3"))
+GROWTH_PROFIT_THRESHOLD = float(os.getenv("GROWTH_PROFIT_THRESHOLD", "0.6"))
+
+# 성장 로그 파일(레일웨이/렌더에서 /tmp는 보통 OK)
+GROWTH_LOG_PATH = os.getenv("GROWTH_LOG_PATH", "/tmp/growth_log.jsonl")
+
+# ===== AUTO SCALE (balance-based) =====
+AUTO_SCALE = os.getenv("AUTO_SCALE", "true").lower() == "true"
+SCALE_REF_USDT = float(os.getenv("SCALE_REF_USDT", "50"))   # 잔고 50USDT를 기준 1.0배
+SCALE_MIN = float(os.getenv("SCALE_MIN", "0.5"))
+SCALE_MAX = float(os.getenv("SCALE_MAX", "2.0"))
+SCALE_SMOOTH = float(os.getenv("SCALE_SMOOTH", "0.5"))      # 0~1 (높을수록 부드럽게 변화)
