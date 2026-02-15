@@ -1182,9 +1182,10 @@ class Trader:
             lines.append("📍 POS=None")
         lines.append(f"📈 day_profit≈{self.day_profit:.2f} | winrate={winrate:.1f}% (W{self.win}/L{self.loss}) | consec_losses={self.consec_losses}")
         if self.state.get("entry_reason"):
-            lines.append(f"🧠 근거:\n{self.state.get('entry_reason')}")if self.state.get("last_event"):
-    lines.append(f"📝 last={self.state['last_event']}")
+    lines.append(f"🧠 근거:\n{self.state['entry_reason']}")
 
+if self.state.get("last_event"):
+    lines.append(f"📝 last={self.state['last_event']}")
 stats = get_ai_stats()
 lines.append(f"🤖 AI Winrate: {stats['winrate']}% ({stats['wins']}W/{stats['losses']}L)")
 
