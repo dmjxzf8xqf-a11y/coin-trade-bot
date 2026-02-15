@@ -1,55 +1,16 @@
 # ai_learn.py
 import json
 import os
-
-FILE = "learn_state.json"
-
-
-def load_state():
-    if not os.path.exists(FILE):
-        return {"wins": 0, "losses": 0, "enter_score": 60}
-    with open(FILE, "r") as f:
-        return json.load(f)
-
-
-def save_state(state):
-    with open(FILE, "w") as f:
-        json.dump(state, f)
-
-
-def update_result(win):
-    state = load_state()
-
-    if win:
-        state["wins"] += 1
-    else:
-        state["losses"] += 1
-
-    total = state["wins"] + state["losses"]
-
-    if total >= 20:
-        winrate = state["wins"] / total
-
-        # 자동 튜닝
-        if winrate < 0.50:
-            state["enter_score"] += 2
-        elif winrate > 0.65:
-            state["enter_score"] -= 1
-
-        state["enter_score"] = max(45, min(85, state["enter_score"]))
-
-    save_state(state)
-    return state["enter_score"]
-# =========================
-# AI PERFORMANCE TRACKER
-# =========================
-
-import json
 from datetime import datetime
 
-STATS_FILE = "ai_stats.json"
+# =========================
+# FILE PATH (Railway 재시작 대비)
+# =========================
+STATS_FILE = os.getenv("AI_STATS_PATH", "ai_stats.json")
 
-
+# =========================
+# 내부 로드/세이브
+# =========================
 def _load_stats():
     try:
         with open(STATS_FILE, "r") as f:
@@ -63,13 +24,18 @@ def _load_stats():
             "last_update": None,
         }
 
-
 def _save_stats(stats):
     with open(STATS_FILE, "w") as f:
         json.dump(stats, f, indent=2)
 
-
+# =========================
+# 트레이드 결과 기록
+# =========================
 def record_trade_result(pnl):
+    """
+    pnl > 0 → win
+    pnl <= 0 → loss
+    """
     stats = _load_stats()
 
     stats["trades"] += 1
@@ -82,13 +48,19 @@ def record_trade_result(pnl):
     stats["winrate"] = round(
         stats["wins"] / max(1, stats["trades"]) * 100, 2
     )
-    stats["last_update"] = datetime.utcnow().isoformat()
 
+    stats["last_update"] = datetime.utcnow().isoformat()
     _save_stats(stats)
 
-
+# =========================
+# 현재 AI 성능 반환
+# =========================
 def get_ai_stats():
     return _load_stats()
+
+# =========================
+# 승률 진화 알림
+# =========================
 _last_notified_winrate = 0
 
 def check_winrate_milestone():
@@ -97,7 +69,6 @@ def check_winrate_milestone():
 
     wr = stats["winrate"]
 
-    # 5% 단위 상승 알림
     if wr >= _last_notified_winrate + 5 and stats["wins"] >= 20:
         _last_notified_winrate = wr
         return f"🤖 AI 진화 감지\n승률 상승 → {wr}%"
