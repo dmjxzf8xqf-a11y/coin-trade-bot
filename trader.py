@@ -1,14 +1,13 @@
-# trader.py (FINAL+++ UPGRADE) - 기존 FINAL++ 유지 + 멀티코인 자동선정 + 자동코인탐색(Discovery)
-# + 분산진입(옵션/버튼/명령) + AI 자동성장(안전장치 포함) + Bybit 10002 시간동기화/재시도
-#
-# ✅ 그대로 "전체 교체" 해서 한 번에 복붙용 (파일 1개)
+# trader.py (FINAL+++ UPGRADE) - FIXED FULL COPY-PASTE
+# ✅ FIX 1) retCode=110043 leverage not modified  -> IGNORE (treat as success)
+# ✅ FIX 2) retCode=10001 Missing symbol or settleCoin -> position/list always includes settleCoin (default USDT)
 #
 # --- Telegram 명령어 ---
 # /start /stop
 # /safe /aggro
 # /status
-# /buy  (현재 심볼로 롱 수동)
-# /short (현재 심볼로 숏 수동)
+# /buy  (고정 심볼로 롱 수동)
+# /short (고정 심볼로 숏 수동)
 # /sell /panic
 #
 # --- 추가 업그레이드 명령어 ---
@@ -16,16 +15,13 @@
 # /add BTCUSDT,ETHUSDT      후보 추가
 # /remove BTCUSDT           후보 제거
 # /autod on|off             자동탐색(거래대금 상위 자동추가) ON/OFF
-# /div on|off               분산진입 ON/OFF (돈 적을 때 기본 OFF)
+# /div on|off               분산진입 ON/OFF
 # /maxpos 1|2|3             최대 동시 포지션 수
 # /setusdt 5                주문 USDT(현재 모드에 적용)
 # /setlev 3                 레버(현재 모드에 적용)
 # /setscore 65              진입 점수(현재 모드에 적용)
-# /setsymbol BTCUSDT         수동 고정 심볼(스캔 대신 이 심볼만)
+# /setsymbol BTCUSDT        수동 고정 심볼(스캔 대신 이 심볼만)
 # /autosymbol on|off         심볼 자동선정(스캐너) ON/OFF
-#
-# --- 안전 기본값 ---
-# 돈 적으면: MAX_POSITIONS=1, DIVERSIFY=false, AI_GROWTH=true 권장
 #
 import os, time, json, hmac, hashlib, requests
 from urllib.parse import urlencode
@@ -65,6 +61,9 @@ BYBIT_BASE_URL = (os.getenv("BYBIT_BASE_URL") or _cfg("BYBIT_BASE_URL", "https:/
 CATEGORY = os.getenv("CATEGORY", _cfg("CATEGORY", "linear"))
 ACCOUNT_TYPE = os.getenv("ACCOUNT_TYPE", _cfg("ACCOUNT_TYPE", "UNIFIED"))
 
+# ✅ 중요: UNIFIED에서 position/list는 settleCoin을 요구하는 케이스가 많음
+SETTLE_COIN = os.getenv("SETTLE_COIN", _cfg("SETTLE_COIN", "USDT")).upper()
+
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", _cfg("BYBIT_API_KEY", ""))
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", _cfg("BYBIT_API_SECRET", ""))
 
@@ -73,7 +72,6 @@ CHAT_ID = os.getenv("CHAT_ID", _cfg("CHAT_ID", ""))
 
 DRY_RUN = str(os.getenv("DRY_RUN", str(_cfg("DRY_RUN", "true")))).lower() in ("1","true","yes","y","on")
 
-# 기존 FINAL++ 기본
 MODE_DEFAULT = os.getenv("MODE", _cfg("MODE", "SAFE")).upper()  # SAFE/AGGRO
 ALLOW_LONG_DEFAULT = str(os.getenv("ALLOW_LONG", "true")).lower() in ("1","true","yes","y","on")
 ALLOW_SHORT_DEFAULT = str(os.getenv("ALLOW_SHORT", "true")).lower() in ("1","true","yes","y","on")
@@ -111,21 +109,18 @@ TIME_EXIT_MIN = int(os.getenv("TIME_EXIT_MIN","360"))
 MAX_ENTRIES_PER_DAY = int(os.getenv("MAX_ENTRIES_PER_DAY","6"))
 MAX_CONSEC_LOSSES = int(os.getenv("MAX_CONSEC_LOSSES","3"))
 
-# fee/slippage
-FEE_RATE = float(os.getenv("FEE_RATE", "0.0006"))     # per-side
-SLIPPAGE_BPS = float(os.getenv("SLIPPAGE_BPS", "5"))  # bps
+FEE_RATE = float(os.getenv("FEE_RATE", "0.0006"))
+SLIPPAGE_BPS = float(os.getenv("SLIPPAGE_BPS", "5"))
 
-# partial TP
 PARTIAL_TP_ON = str(os.getenv("PARTIAL_TP_ON","true")).lower() in ("1","true","yes","y","on")
 PARTIAL_TP_PCT = float(os.getenv("PARTIAL_TP_PCT", "0.5"))
 TP1_FRACTION = float(os.getenv("TP1_FRACTION", "0.5"))
 MOVE_STOP_TO_BE_ON_TP1 = str(os.getenv("MOVE_STOP_TO_BE_ON_TP1","true")).lower() in ("1","true","yes","y","on")
 
-# time filter
-TRADE_HOURS_UTC = os.getenv("TRADE_HOURS_UTC", "00-23")  # "01-23" or "22-03"
+TRADE_HOURS_UTC = os.getenv("TRADE_HOURS_UTC", "00-23")
 
 # =========================
-# UPGRADE: MULTI-COIN + DISCOVERY + DIVERSIFY + AI GROWTH
+# MULTI-COIN + DISCOVERY + DIVERSIFY + AI GROWTH
 # =========================
 SYMBOLS_ENV = os.getenv("SYMBOLS", _cfg("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT"))
 SYMBOLS_ENV = [s.strip().upper() for s in SYMBOLS_ENV.split(",") if s.strip()]
@@ -141,8 +136,8 @@ DISCOVERY_TOPN = int(os.getenv("DISCOVERY_TOPN", "20"))
 DIVERSIFY_DEFAULT = str(os.getenv("DIVERSIFY", "false")).lower() in ("1","true","yes","y","on")
 MAX_POSITIONS_DEFAULT = int(os.getenv("MAX_POSITIONS", "1"))
 
-AUTO_SYMBOL_DEFAULT = str(os.getenv("AUTO_SYMBOL", "true")).lower() in ("1","true","yes","y","on")  # 스캐너 사용 여부
-FIXED_SYMBOL_DEFAULT = os.getenv("SYMBOL", _cfg("SYMBOL", "BTCUSDT")).upper()  # 기존 호환: SYMBOL env가 있으면 고정처럼 쓸 수 있음
+AUTO_SYMBOL_DEFAULT = str(os.getenv("AUTO_SYMBOL", "true")).lower() in ("1","true","yes","y","on")
+FIXED_SYMBOL_DEFAULT = os.getenv("SYMBOL", _cfg("SYMBOL", "BTCUSDT")).upper()
 
 AI_GROWTH_DEFAULT = str(os.getenv("AI_GROWTH", "true")).lower() in ("1","true","yes","y","on")
 GROWTH_MIN_TRADES = int(os.getenv("GROWTH_MIN_TRADES", "6"))
@@ -150,7 +145,6 @@ GROWTH_STEP_SCORE = int(os.getenv("GROWTH_STEP_SCORE", "2"))
 GROWTH_STEP_USDT = float(os.getenv("GROWTH_STEP_USDT", "1.0"))
 GROWTH_STEP_LEV = int(os.getenv("GROWTH_STEP_LEV", "1"))
 
-# 안전 범위
 GROWTH_SCORE_MIN = int(os.getenv("GROWTH_SCORE_MIN", "45"))
 GROWTH_SCORE_MAX = int(os.getenv("GROWTH_SCORE_MAX", "85"))
 GROWTH_USDT_MIN = float(os.getenv("GROWTH_USDT_MIN", "3"))
@@ -158,11 +152,9 @@ GROWTH_USDT_MAX = float(os.getenv("GROWTH_USDT_MAX", "30"))
 GROWTH_LEV_MIN = int(os.getenv("GROWTH_LEV_MIN", "1"))
 GROWTH_LEV_MAX = int(os.getenv("GROWTH_LEV_MAX", "12"))
 
-# Bybit 10002 방지
 RECV_WINDOW_BASE = int(os.getenv("RECV_WINDOW", "8000"))
 MAX_RETRIES = int(os.getenv("BYBIT_MAX_RETRIES", "4"))
 
-# DRY_RUN 가격 소스
 BINANCE = "https://api.binance.com/api/v3/ticker/price"
 
 def _parse_trade_hours(spec: str):
@@ -208,6 +200,9 @@ def _bybit_server_time_ms():
     except Exception:
         pass
     return int(time.time() * 1000)
+
+def _is_bybit_lev_not_modified(ret_code: str, ret_msg: str) -> bool:
+    return str(ret_code) == "110043" or ("leverage not modified" in (ret_msg or "").lower())
 
 class BybitHTTP:
     def __init__(self):
@@ -276,7 +271,6 @@ class BybitHTTP:
                     raise RuntimeError(f"Bybit 403 blocked base={BYBIT_BASE_URL} proxy={'ON' if PROXIES else 'OFF'}")
                 if r.status_code == 407:
                     raise RuntimeError("Proxy auth failed (407)")
-
                 if j.get("_non_json"):
                     raise RuntimeError(f"Bybit non-json status={j.get('status')} raw={j.get('raw')}")
 
@@ -284,10 +278,15 @@ class BybitHTTP:
                 if ret == "0":
                     return j
 
+                # ✅ 10002: time sync issue -> resync + retry
                 if ret == "10002":
                     self._last_sync = 0
                     time.sleep(0.6 + attempt * 0.4)
                     continue
+
+                # ✅ FIX: leverage not modified -> treat success ONLY for set-leverage endpoint
+                if path == "/v5/position/set-leverage" and _is_bybit_lev_not_modified(ret, j.get("retMsg", "")):
+                    return j
 
                 raise RuntimeError(f"Bybit error retCode={ret} retMsg={j.get('retMsg')}")
             except Exception:
@@ -300,7 +299,7 @@ class BybitHTTP:
 http = BybitHTTP()
 
 # =========================
-# Indicators (기존 유지)
+# Indicators
 # =========================
 def ema(data, p):
     k = 2/(p+1)
@@ -385,20 +384,41 @@ def get_klines(symbol: str, interval: str, limit: int):
             out.append([0,0,f"{h}",f"{l}",f"{c}",0])
             price=c
         return out
-
-    j = http.request("GET", "/v5/market/kline", {"category": CATEGORY, "symbol": symbol, "interval": str(interval), "limit": int(limit)}, auth=False)
+    j = http.request("GET", "/v5/market/kline",
+                     {"category": CATEGORY, "symbol": symbol, "interval": str(interval), "limit": int(limit)},
+                     auth=False)
     return (j.get("result") or {}).get("list") or []
 
-def get_positions_all():
+# =========================
+# Positions (FIXED: settleCoin)
+# =========================
+def get_positions_all(symbol: str = None):
+    """
+    ✅ FIX: UNIFIED에서 10001 방지 위해 settleCoin 기본 포함
+    - symbol이 있으면 symbol도 같이 넘겨서 더 안전하게
+    """
     if DRY_RUN:
         return []
-    j = http.request("GET", "/v5/position/list", {"category": CATEGORY}, auth=True)
+    params = {"category": CATEGORY, "settleCoin": SETTLE_COIN}
+    if symbol:
+        params["symbol"] = symbol
+    j = http.request("GET", "/v5/position/list", params, auth=True)
     return (j.get("result") or {}).get("list") or []
+
+def get_position_size(symbol: str) -> float:
+    if DRY_RUN:
+        return 0.0
+    plist = get_positions_all(symbol=symbol)
+    for p in plist:
+        if (p.get("symbol") or "").upper() == symbol.upper():
+            return float(p.get("size") or 0.0)
+    return 0.0
 
 def set_leverage(symbol: str, x: int):
     if DRY_RUN:
         return {"retCode": 0, "retMsg": "DRY_RUN"}
     body = {"category": CATEGORY, "symbol": symbol, "buyLeverage": str(x), "sellLeverage": str(x)}
+    # ✅ 110043는 http.request에서 성공 처리됨
     return http.request("POST", "/v5/position/set-leverage", body, auth=True)
 
 def order_market(symbol: str, side: str, qty: float, reduce_only=False):
@@ -423,15 +443,13 @@ def qty_from_order_usdt(symbol: str, order_usdt, lev, price):
     if order_usdt <= 0 or price <= 0:
         return 0.0
     raw_qty = (order_usdt * lev) / price
-    if "BTC" in symbol:
-        step = 0.001
-    else:
-        step = 0.01
+    # 아주 단순 step (코인별 정확한 lotSize는 나중에 계정에서 심볼정보로 개선 가능)
+    step = 0.001 if "BTC" in symbol else 0.01
     qty = (raw_qty // step) * step
     return round(qty, 6)
 
 # =========================
-# Reason + Signal (기존 유지, symbol 인자만 추가)
+# Reason + Signal
 # =========================
 def build_reason(symbol, side, price, ef, es, r, a, score, trend_ok, enter_ok):
     return (
@@ -515,7 +533,7 @@ def compute_signal_and_exits(symbol: str, side: str, price: float, mp: dict):
     return ok, reason, score, sl, tp, a
 
 # =========================
-# PnL estimate (기존 유지)
+# PnL estimate
 # =========================
 def _est_round_trip_cost_frac():
     slip = (SLIPPAGE_BPS / 10000.0)
@@ -553,39 +571,31 @@ class Trader:
     def __init__(self, state=None):
         self.state = state if isinstance(state, dict) else {}
 
-        # runtime flags
         self.trading_enabled = True
         self.mode = MODE_DEFAULT
         self.allow_long = ALLOW_LONG_DEFAULT
         self.allow_short = ALLOW_SHORT_DEFAULT
 
-        # multi-coin universe
-        self.symbols = list(dict.fromkeys(SYMBOLS_ENV))  # unique keep order
+        self.symbols = list(dict.fromkeys(SYMBOLS_ENV))
         self.auto_discovery = AUTO_DISCOVERY_DEFAULT
         self.auto_symbol = AUTO_SYMBOL_DEFAULT
-        self.fixed_symbol = FIXED_SYMBOL_DEFAULT  # used if auto_symbol OFF
+        self.fixed_symbol = FIXED_SYMBOL_DEFAULT
         self._last_discovery_ts = 0
 
-        # diversify / max positions
         self.diversify = DIVERSIFY_DEFAULT
         self.max_positions = int(_clamp(MAX_POSITIONS_DEFAULT, 1, 5))
 
-        # AI growth
         self.ai_growth = AI_GROWTH_DEFAULT
-        self._trade_count_total = 0  # realized exits
-        self._recent_results = []    # list of pnl_est
+        self._trade_count_total = 0
+        self._recent_results = []
 
-        # per-mode tunables (can be overridden by telegram)
         self.tune = {
             "SAFE": {"lev": LEVERAGE_SAFE, "order_usdt": ORDER_USDT_SAFE, "enter_score": ENTER_SCORE_SAFE},
             "AGGRO": {"lev": LEVERAGE_AGGRO, "order_usdt": ORDER_USDT_AGGRO, "enter_score": ENTER_SCORE_AGGRO},
         }
 
-        # positions: list of dict
-        # each pos: {"symbol","side","entry_price","entry_ts","stop_price","tp_price","trail_price","tp1_price","tp1_done","last_order_usdt","last_lev"}
-        self.positions = []
+        self.positions = []  # dict list
 
-        # stats day
         self.win = 0
         self.loss = 0
         self.day_profit = 0.0
@@ -596,7 +606,7 @@ class Trader:
         self._cooldown_until = 0
         self._last_alert_ts = 0
         self._last_err_ts = 0
-        self._lev_set_cache = {}  # symbol->(mode)->bool
+        self._lev_set_cache = {}
 
         self._last_scan_ts = 0
 
@@ -626,8 +636,7 @@ class Trader:
             self.consec_losses = 0
 
     def _mp(self):
-        base = mode_params(self.mode, self.tune.get(self.mode, {}))
-        return base
+        return mode_params(self.mode, self.tune.get(self.mode, {}))
 
     def _ensure_leverage(self, symbol: str):
         mp = self._mp()
@@ -635,6 +644,7 @@ class Trader:
         if self._lev_set_cache.get(key):
             return
         if not DRY_RUN:
+            # ✅ 110043는 http.request에서 성공 처리됨
             set_leverage(symbol, int(mp["lev"]))
         self._lev_set_cache[key] = True
 
@@ -646,7 +656,6 @@ class Trader:
             return
         self._last_discovery_ts = time.time()
         try:
-            # 24h 거래대금 상위(USDT) 추정: turnover24h 사용(선형/현물 기준 차이 있지만 필터로 충분)
             j = http.request("GET", "/v5/market/tickers", {"category": CATEGORY}, auth=False)
             lst = (j.get("result") or {}).get("list") or []
             scored = []
@@ -654,16 +663,13 @@ class Trader:
                 sym = (t.get("symbol") or "").upper()
                 if not sym.endswith("USDT"):
                     continue
-                # 밈/극단 스캠 등은 여기서도 완벽히 걸러지진 않음 -> spread/score에서 추가 필터
                 turnover = float(t.get("turnover24h") or 0)
                 if turnover <= 0:
                     continue
                 scored.append((turnover, sym))
             scored.sort(reverse=True, key=lambda x: x[0])
             top_syms = [s for _, s in scored[:DISCOVERY_TOPN]]
-            # 기존 수동 목록 유지 + top 추가 (중복 제거)
-            merged = list(dict.fromkeys(self.symbols + top_syms))
-            self.symbols = merged
+            self.symbols = list(dict.fromkeys(self.symbols + top_syms))
             self.state["discovery"] = {"top_added": top_syms[:10], "universe_size": len(self.symbols)}
         except Exception as e:
             self.state["discovery_error"] = str(e)
@@ -671,7 +677,6 @@ class Trader:
     # ---------------- scanning ----------------
     def _score_symbol(self, symbol: str, price: float):
         mp = self._mp()
-        # spread filter
         sp = get_spread_pct(symbol)
         if sp is not None and sp > MAX_SPREAD_PCT:
             return {"ok": False, "reason": f"SPREAD({sp:.2f}%)"}
@@ -679,18 +684,13 @@ class Trader:
         if self.allow_long:
             okL, reasonL, scoreL, slL, tpL, aL = compute_signal_and_exits(symbol, "LONG", price, mp)
         else:
-            okL, scoreL = False, -999
-            reasonL = ""
-            slL = tpL = aL = None
+            okL, scoreL, reasonL, slL, tpL, aL = False, -999, "", None, None, None
 
         if self.allow_short:
             okS, reasonS, scoreS, slS, tpS, aS = compute_signal_and_exits(symbol, "SHORT", price, mp)
         else:
-            okS, scoreS = False, -999
-            reasonS = ""
-            slS = tpS = aS = None
+            okS, scoreS, reasonS, slS, tpS, aS = False, -999, "", None, None, None
 
-        # pick direction by higher score (기존 로직 확장)
         if scoreS > scoreL:
             return {"ok": okS, "side": "SHORT", "score": scoreS, "reason": reasonS, "sl": slS, "tp": tpS, "atr": aS}
         return {"ok": okL, "side": "LONG", "score": scoreL, "reason": reasonL, "sl": slL, "tp": tpL, "atr": aL}
@@ -703,9 +703,7 @@ class Trader:
         mp = self._mp()
         enter_score = int(mp["enter_score"])
 
-        candidates = self.symbols[:]
-        if len(candidates) > SCAN_LIMIT:
-            candidates = candidates[:SCAN_LIMIT]
+        candidates = self.symbols[:SCAN_LIMIT] if len(self.symbols) > SCAN_LIMIT else self.symbols[:]
 
         best = None
         reasons = []
@@ -746,8 +744,6 @@ class Trader:
                 entry = float(p.get("avgPrice") or p.get("entryPrice") or 0)
                 real.append({"symbol": sym, "side": side, "size": size, "entry_price": entry})
             self.state["real_positions"] = real[:5]
-            # 우리는 내부 관리 포지션과 정확히 1:1 동기화까지는 하지 않음(복잡/오류 위험)
-            # 대신, 내부 positions가 없는데 real이 있으면 경고만
             if (not self.positions) and real:
                 self.notify_throttled(f"⚠️ 실계정 포지션 감지({len(real)}개). 봇 내부상태는 비어있음 → /panic 또는 수동정리 권장", 120)
         except Exception as e:
@@ -769,7 +765,6 @@ class Trader:
             order_market(symbol, "Buy" if side == "LONG" else "Sell", qty)
 
         tp1_price = None
-        tp1_done = False
         if PARTIAL_TP_ON:
             if side == "LONG":
                 tp1_price = price + (tp - price) * TP1_FRACTION
@@ -785,7 +780,7 @@ class Trader:
             "tp_price": tp,
             "trail_price": None,
             "tp1_price": tp1_price,
-            "tp1_done": tp1_done,
+            "tp1_done": False,
             "last_order_usdt": order_usdt,
             "last_lev": lev,
         }
@@ -805,7 +800,6 @@ class Trader:
         order_market(symbol, "Sell" if side == "LONG" else "Buy", close_qty, reduce_only=True)
 
     def _exit_position(self, idx: int, why: str, force=False):
-        # idx in self.positions
         if idx < 0 or idx >= len(self.positions):
             return
         pos = self.positions[idx]
@@ -820,21 +814,14 @@ class Trader:
                 return
             price = pos.get("entry_price") or 0
 
-        # 실청산은 size를 모르는 문제가 있어서: v5 포지션에서 size 찾아서 reduceOnly 청산
         if not DRY_RUN:
             try:
-                plist = get_positions_all()
-                qty = 0.0
-                for p in plist:
-                    if (p.get("symbol") or "").upper() == symbol:
-                        qty = float(p.get("size") or 0)
-                        break
+                qty = get_position_size(symbol)
                 if qty > 0:
                     self._close_qty(symbol, side, qty)
             except Exception as e:
                 self.err_throttled(f"❌ 실청산 실패: {symbol} {e}")
 
-        # pnl estimate
         entry_price = float(pos.get("entry_price") or 0)
         notional = float(pos.get("last_order_usdt") or 0) * float(pos.get("last_lev") or 0)
         pnl_est = estimate_pnl_usdt(side, entry_price, price, notional)
@@ -853,21 +840,16 @@ class Trader:
             self.consec_losses += 1
 
         self.notify(f"✅ EXIT {symbol} {side} ({why}) price={price:.6f} pnl≈{pnl_est:.2f} day≈{self.day_profit:.2f} (W{self.win}/L{self.loss})")
-
-        # remove
         self.positions.pop(idx)
-
-        # growth tune (after exit)
         self._maybe_ai_grow()
 
-    # ---------------- AI Growth (자동성장) ----------------
+    # ---------------- AI Growth ----------------
     def _maybe_ai_grow(self):
         if not self.ai_growth:
             return
         if self._trade_count_total < GROWTH_MIN_TRADES:
             return
 
-        # 최근 성과 기반
         recent = self._recent_results[-GROWTH_MIN_TRADES:]
         avg = sum(recent) / max(1, len(recent))
         wins = sum(1 for x in recent if x >= 0)
@@ -878,21 +860,19 @@ class Trader:
         if not t:
             return
 
-        # 안전 규칙:
-        # - 연속손실 많으면 더 보수적으로(enter_score 올리고, usdt/lev 내림)
-        # - 평균 손익이 +이고 승률도 괜찮으면 조금 공격적으로(enter_score 낮추고, usdt/lev 약간 올림)
         if self.consec_losses >= 2 or avg < 0:
             t["enter_score"] = int(_clamp(int(t["enter_score"]) + GROWTH_STEP_SCORE, GROWTH_SCORE_MIN, GROWTH_SCORE_MAX))
             t["order_usdt"] = float(_clamp(float(t["order_usdt"]) - GROWTH_STEP_USDT, GROWTH_USDT_MIN, GROWTH_USDT_MAX))
             t["lev"] = int(_clamp(int(t["lev"]) - GROWTH_STEP_LEV, GROWTH_LEV_MIN, GROWTH_LEV_MAX))
             self.tune[m] = t
+            self._lev_set_cache = {}  # 레버 변경 가능성 -> 캐시 리셋
             self.notify_throttled(f"🧠 AI성장(보수): score↑ usdt↓ lev↓ | score={t['enter_score']} usdt={t['order_usdt']} lev={t['lev']} (avg={avg:.2f}, winrate={winrate:.0%})", 90)
             return
 
         if avg > 0 and winrate >= 0.55:
             t["enter_score"] = int(_clamp(int(t["enter_score"]) - 1, GROWTH_SCORE_MIN, GROWTH_SCORE_MAX))
             t["order_usdt"] = float(_clamp(float(t["order_usdt"]) + GROWTH_STEP_USDT, GROWTH_USDT_MIN, GROWTH_USDT_MAX))
-            t["lev"] = int(_clamp(int(t["lev"]) + 0, GROWTH_LEV_MIN, GROWTH_LEV_MAX))  # 레버는 기본 고정(리스크 큼)
+            t["lev"] = int(_clamp(int(t["lev"]) + 0, GROWTH_LEV_MIN, GROWTH_LEV_MAX))
             self.tune[m] = t
             self.notify_throttled(f"🧠 AI성장(완화): score↓ usdt↑ | score={t['enter_score']} usdt={t['order_usdt']} lev={t['lev']} (avg={avg:.2f}, winrate={winrate:.0%})", 90)
 
@@ -902,7 +882,6 @@ class Trader:
         if not cmd:
             return
 
-        # quick parse
         parts = cmd.split()
         c0 = parts[0].lower()
         arg = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
@@ -917,10 +896,12 @@ class Trader:
             return
         if c0 == "/safe":
             self.mode = "SAFE"
+            self._lev_set_cache = {}  # 모드 바뀌면 캐시 리셋
             self.notify("🛡 SAFE 모드로 전환")
             return
         if c0 in ("/aggro", "/attack"):
             self.mode = "AGGRO"
+            self._lev_set_cache = {}
             self.notify("⚔️ AGGRO 모드로 전환")
             return
 
@@ -996,7 +977,7 @@ class Trader:
                 v = int(arg)
                 v = int(_clamp(v, GROWTH_LEV_MIN, GROWTH_LEV_MAX))
                 self.tune[self.mode]["lev"] = v
-                self._lev_set_cache = {}  # reset cache
+                self._lev_set_cache = {}
                 self.notify(f"⚙️ {self.mode} lev={v}")
             except Exception:
                 self.notify("❌ 사용법: /setlev 3")
@@ -1077,7 +1058,7 @@ class Trader:
         lines.append(f"⚙️ lev={mp['lev']} | order_usdt={mp['order_usdt']} | enter_score>={mp['enter_score']}")
         lines.append(f"⏰ entry_hours_utc={TRADE_HOURS_UTC} | allowed_now={entry_allowed_now_utc()}")
         lines.append(f"💸 fee={FEE_RATE:.4%}/side | slip={SLIPPAGE_BPS:.1f}bps/side | partialTP={PARTIAL_TP_ON}({PARTIAL_TP_PCT:.0%})")
-        lines.append(f"🌐 base={BYBIT_BASE_URL} | proxy={'ON' if PROXIES else 'OFF'}")
+        lines.append(f"🌐 base={BYBIT_BASE_URL} | proxy={'ON' if PROXIES else 'OFF'} | settleCoin={SETTLE_COIN}")
         lines.append(f"🧭 AUTO_SYMBOL={self.auto_symbol} FIXED={self.fixed_symbol} | DISCOVERY={self.auto_discovery}")
         lines.append(f"🧩 DIVERSIFY={self.diversify} MAX_POS={self.max_positions} | universe={len(self.symbols)}")
         if self.state.get("last_scan"):
@@ -1107,7 +1088,6 @@ class Trader:
             price = get_price(symbol)
             mp = self._mp()
             ok, reason, score, sl, tp, a = compute_signal_and_exits(symbol, side, price, mp)
-            # 수동은 ok 강제 진입(너가 버튼 누른거니까)
             self._enter(symbol, side, price, reason + "- manual=True\n", sl, tp)
         except Exception as e:
             self.err_throttled(f"❌ manual enter 실패: {e}")
@@ -1117,7 +1097,6 @@ class Trader:
             if not self.positions and not force:
                 self.notify("⚠️ 포지션 없음")
                 return
-            # 전부 청산
             for idx in range(len(self.positions)-1, -1, -1):
                 self._exit_position(idx, why, force=force)
             self._cooldown_until = time.time() + COOLDOWN_SEC
@@ -1132,11 +1111,9 @@ class Trader:
 
         price = get_price(symbol)
 
-        # re-score for exit logic (기존: score drop / time exit)
         mp = self._mp()
         ok, reason, score, sl_new, tp_new, a = compute_signal_and_exits(symbol, side, price, mp)
 
-        # trailing
         if TRAIL_ON and a is not None and pos.get("stop_price") is not None:
             dist = a * TRAIL_ATR_MULT
             if side == "LONG":
@@ -1150,31 +1127,19 @@ class Trader:
 
         eff_stop = pos["stop_price"] if pos.get("stop_price") is not None else price
         if pos.get("trail_price") is not None:
-            if side == "LONG":
-                eff_stop = max(eff_stop, pos["trail_price"])
-            else:
-                eff_stop = min(eff_stop, pos["trail_price"])
+            eff_stop = max(eff_stop, pos["trail_price"]) if side == "LONG" else min(eff_stop, pos["trail_price"])
 
-        # time exit
         if pos.get("entry_ts") and (time.time() - pos["entry_ts"]) > (TIME_EXIT_MIN * 60):
             self._exit_position(idx, "TIME EXIT")
             return
 
-        # score drop exit
         if score <= EXIT_SCORE_DROP:
             self._exit_position(idx, f"SCORE DROP {score}")
             return
 
-        # partial TP (실계정에서만 정확)
         if PARTIAL_TP_ON and (not pos.get("tp1_done")) and pos.get("tp1_price") is not None and (not DRY_RUN):
             try:
-                # real size from positions
-                plist = get_positions_all()
-                qty_total = 0.0
-                for p in plist:
-                    if (p.get("symbol") or "").upper() == symbol:
-                        qty_total = float(p.get("size") or 0.0)
-                        break
+                qty_total = get_position_size(symbol)
                 if qty_total > 0:
                     hit_tp1 = (price >= pos["tp1_price"]) if side=="LONG" else (price <= pos["tp1_price"])
                     if hit_tp1:
@@ -1190,7 +1155,6 @@ class Trader:
             except Exception as e:
                 self.err_throttled(f"❌ partial TP 실패: {e}")
 
-        # SL/TP
         if side == "LONG":
             if eff_stop is not None and price <= eff_stop:
                 self._exit_position(idx, "STOP/TRAIL")
@@ -1206,7 +1170,6 @@ class Trader:
                 self._exit_position(idx, "TAKE PROFIT")
                 return
 
-        # update state
         self.state["last_event"] = f"HOLD {symbol} {side} score={score} stop={eff_stop:.6f} tp={pos.get('tp_price'):.6f}"
 
     # ---------------- main tick ----------------
@@ -1228,15 +1191,10 @@ class Trader:
             self.state["last_event"] = "STOP: consec losses"
             return
 
-        # discovery refresh
         self._refresh_discovery()
-
-        # sync real positions (optional)
         self._sync_real_positions()
 
-        # manage existing positions
         if self.positions:
-            # 여러 포지션이면 순차 관리
             for idx in range(len(self.positions)-1, -1, -1):
                 try:
                     self._manage_one(idx)
@@ -1244,7 +1202,6 @@ class Trader:
                     self.err_throttled(f"❌ manage 실패: {e}")
             return
 
-        # no positions -> entry
         if time.time() < self._cooldown_until:
             self.state["last_event"] = "대기: cooldown"
             return
@@ -1255,14 +1212,11 @@ class Trader:
             self.state["last_event"] = f"대기: 시간필터(UTC {TRADE_HOURS_UTC})"
             return
 
-        # decide symbols / entry plan
         if not self.auto_symbol:
-            # fixed symbol only (기존 호환)
             symbol = self.fixed_symbol
             try:
                 price = get_price(symbol)
                 mp = self._mp()
-                # pick best direction using same rule
                 info = self._score_symbol(symbol, price)
                 self.state["entry_reason"] = info.get("reason")
                 if not info.get("ok"):
@@ -1277,15 +1231,11 @@ class Trader:
                 self.err_throttled(f"❌ entry 실패(fixed): {e}")
             return
 
-        # auto symbol scan
         pick = self.pick_best()
         if not pick:
             self.state["last_event"] = "대기: 스캔 결과 없음"
             return
 
-        # diversify logic:
-        # - 기본은 1포지션이라 여기서는 사실상 pick 1개만 진입
-        # - diversify=true AND max_positions>1 인 경우: 진입 후 다음 tick에 또 pick 가능하도록 둠(무리진입 방지)
         try:
             self._enter(pick["symbol"], pick["side"], pick["price"], pick["reason"], pick["sl"], pick["tp"])
             self.state["last_event"] = f"ENTER {pick['symbol']} {pick['side']}"
@@ -1320,4 +1270,5 @@ class Trader:
             "max_positions": self.max_positions,
             "tune": {"mode": self.mode, "lev": mp["lev"], "order_usdt": mp["order_usdt"], "enter_score": mp["enter_score"]},
             "ai_growth": self.ai_growth,
+            "settle_coin": SETTLE_COIN,
         }
