@@ -1305,7 +1305,9 @@ lines.append(f"🤖 AI Winrate: {stats['winrate']}% ({stats['wins']}W/{stats['lo
 
         self._refresh_discovery()
         self._sync_real_positions()
-
+        msg = check_winrate_milestone()
+        if msg:
+            self.notify(msg)
         if self.positions:
             for idx in range(len(self.positions)-1, -1, -1):
                 try:
