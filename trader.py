@@ -446,10 +446,11 @@ def set_leverage(symbol: str, x: int):
 
 def order_market(symbol: str, side: str, qty: float, reduce_only=False):
     if DRY_RUN:
-        return {"retCode": 0, "retMsg": "DRY_RUN"}.   
-        qty = fix_qty(qty)   # ✅ body 위에 추가
+        return {"retCode": 0, "retMsg": "DRY_RUN"}
 
-  body = {
+    qty = fix_qty(qty)  # ✅ body 위에 추가
+
+    body = {
         "category": CATEGORY,
         "symbol": symbol,
         "side": side,
@@ -459,9 +460,10 @@ def order_market(symbol: str, side: str, qty: float, reduce_only=False):
     }
     if reduce_only:
         body["reduceOnly"] = True
-    resp = http.request("POST", "/v5/order/create", body, auth=True)
+
+    resp = http.request("POST", "/v5/order/create", body)
     if (resp or {}).get("retCode") != 0:
-        raise Exception(f"ORDER FAILED → retCode={resp.get('retCode')} retMsg={resp.get('retMsg')}")
+        raise Exception(f"ORDER FAILED: {resp}")
     return resp
 
 def qty_from_order_usdt(symbol: str, order_usdt, lev, price):
