@@ -45,8 +45,7 @@ PROXIES = {
 
 import math
 import time
-import math
-import time
+from ai_learn import get_ai_stats
 # ===== qty step 보정 (1000코인만) =====
 def fix_qty(qty, symbol=None):
     try:
