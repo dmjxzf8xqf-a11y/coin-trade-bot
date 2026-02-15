@@ -33,6 +33,17 @@ except Exception:
     pass
 
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+# ===== Proxy 설정 =====
+PROXY = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or ""
+
+PROXIES = {
+    "http": PROXY,
+    "https": PROXY,
+} if PROXY else None
+
+import math
+import time
 import math
 import time
 
