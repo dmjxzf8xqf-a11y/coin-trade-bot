@@ -536,7 +536,9 @@ def compute_signal_and_exits(symbol: str, side: str, price: float, mp: dict):
         r = 50.0
     if a is None:
         a = price * 0.005
-
+# 🔒 AI 학습 기반 위험 RSI 회피
+    if self.state.get("avoid_low_rsi") and r < 40:
+        return False, "AI AVOID LOSS RSI ZONE", 0, None, None, a
     if a / price < 0.002:
         return False, "LOW VOLATILITY", 0, None, None, a
     if a / price > 0.06:
