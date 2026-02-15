@@ -605,7 +605,11 @@ if a is None: a = price * 0.005
     if a / price > 0.06:
         return False, "EXTREME VOLATILITY", 0, None, None, a
     score = ai_score(price, ef, es, r, a)
-    enter_ok = score >= mp["enter_score"]
+
+if a / price < 0.002:
+    score -= 10
+
+enter_ok = score >= mp["enter_score"]
 
     if side == "LONG":
         trend_ok = (price > es) and (ef > es)
