@@ -446,8 +446,8 @@ def set_leverage(symbol: str, x: int):
 
 def order_market(symbol: str, side: str, qty: float, reduce_only=False):
     if DRY_RUN:
-        return {"retCode": 0, "retMsg": "DRY_RUN"}
-  qty = fix_qty(qty)   # ✅ body 위에 추가
+        return {"retCode": 0, "retMsg": "DRY_RUN"}.   
+        qty = fix_qty(qty)   # ✅ body 위에 추가
 
   body = {
         "category": CATEGORY,
