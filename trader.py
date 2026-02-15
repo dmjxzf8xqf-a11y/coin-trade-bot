@@ -594,21 +594,19 @@ def compute_signal_and_exits(symbol: str, side: str, price: float, mp: dict):
     r=rsi(closes, RSI_PERIOD)
     a=atr(highs, lows, closes, ATR_PERIOD)
 
-    if r is None: r = 50.0
-if a is None: a = price * 0.005
+    if r is None:
+        r = 50.0
+    if a is None:
+        a = price * 0.005
 
-    # 🔒 변동성 필터
-if a / price < 0.002:
-    return False, "LOW VOLATILITY", 0, None, None, a
+    # 🔒 변동성 필터 (너무 낮으면 횡보, 너무 높으면 난리장)
+    if a / price < 0.002:
+        return False, "LOW VOLATILITY", 0, None, None, a
+    if a / price > 0.06:
+        return False, "EXTREME VOLATILITY", 0, None, None, a
 
-# 🚨 초고변동 차단
-if a / price > 0.06:
-    return False, "EXTREME VOLATILITY", 0, None, None, a
     score = ai_score(price, ef, es, r, a)
-
-
-
-enter_ok = score >= mp["enter_score"]
+    enter_ok = score >= mp["enter_score"]
 
     if side == "LONG":
         trend_ok = (price > es) and (ef > es)
