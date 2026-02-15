@@ -26,7 +26,7 @@
 import os, time, json, hmac, hashlib, requests
 from urllib.parse import urlencode
 from datetime import datetime, timezone
-
+from ai_learn import record_trade_result
 try:
     from config import *  # optional
 except Exception:
