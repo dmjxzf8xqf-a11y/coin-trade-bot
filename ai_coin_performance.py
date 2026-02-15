@@ -1,41 +1,75 @@
-import json
+import os
+import requests
 
-FILE = "coin_stats.json"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+TABLE = "coin_stats"
 
-def _load():
-    try:
-        with open(FILE) as f:
-            return json.load(f)
-    except:
-        return {}
+def _headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
 
-def _save(data):
-    with open(FILE, "w") as f:
-        json.dump(data, f, indent=2)
+def _ok():
+    return bool(SUPABASE_URL and SUPABASE_KEY)
 
 def record(symbol, pnl):
-    data = _load()
+    if not _ok():
+        return  # DB 미설정이면 조용히 무시(봇 안 죽게)
 
-    if symbol not in data:
-        data[symbol] = {"wins":0, "losses":0}
+    symbol = symbol.upper().strip()
+    # 1) 현재 값 가져오기
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/{TABLE}",
+        headers=_headers(),
+        params={"select": "wins,losses", "symbol": f"eq.{symbol}"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    rows = r.json()
+    wins = rows[0]["wins"] if rows else 0
+    losses = rows[0]["losses"] if rows else 0
 
+    # 2) 업데이트 값 계산
     if pnl > 0:
-        data[symbol]["wins"] += 1
+        wins += 1
     else:
-        data[symbol]["losses"] += 1
+        losses += 1
 
-    _save(data)
+    payload = {"symbol": symbol, "wins": wins, "losses": losses}
+
+    # 3) upsert (있으면 update, 없으면 insert)
+    u = requests.post(
+        f"{SUPABASE_URL}/rest/v1/{TABLE}",
+        headers=_headers(),
+        params={"on_conflict": "symbol"},
+        json=payload,
+        timeout=10,
+    )
+    u.raise_for_status()
 
 def winrate(symbol):
-    data = _load()
-    if symbol not in data:
+    if not _ok():
         return 50
 
-    w = data[symbol]["wins"]
-    l = data[symbol]["losses"]
+    symbol = symbol.upper().strip()
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/{TABLE}",
+        headers=_headers(),
+        params={"select": "wins,losses", "symbol": f"eq.{symbol}", "limit": "1"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        return 50
 
+    w = int(rows[0]["wins"])
+    l = int(rows[0]["losses"])
     total = w + l
     if total == 0:
         return 50
-
-    return round(w/total*100,1)
+    return round(w / total * 100, 1)
