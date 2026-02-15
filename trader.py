@@ -46,6 +46,11 @@ PROXIES = {
 import math
 import time
 from ai_learn import get_ai_stats
+try:
+    from apply_to_trader_patch import apply_to_trader
+except Exception:
+    def apply_to_trader(*args, **kwargs):
+        return (False, "apply_to_trader not available")
 # ===== qty step 보정 (1000코인만) =====
 def fix_qty(qty, symbol=None):
     try:
