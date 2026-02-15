@@ -46,11 +46,14 @@ import math
 import time
 import math
 import time
-# ===== qty step 보정 =====
-def fix_qty(qty):
+# ===== qty step 보정 (1000코인만) =====
+def fix_qty(qty, symbol=None):
     try:
-        step = 1000   # 밈코인 기본 단위
-        return max(step, int(qty // step * step))
+        sym = (symbol or "").upper()
+        if sym.startswith("1000"):
+            step = 1000
+            return max(step, int(qty // step * step))
+        return qty
     except Exception:
         return qty
 def _to_float(x, default=0.0):
@@ -465,7 +468,7 @@ def order_market(symbol: str, side: str, qty: float, reduce_only=False):
     if DRY_RUN:
         return {"retCode": 0, "retMsg": "DRY_RUN"}
 
-    qty = fix_qty(qty)  # ✅ body 위에 추가
+    qty = fix_qty(qty, symbol)  # ✅ body 위에 추가
 
     body = {
         "category": CATEGORY,
