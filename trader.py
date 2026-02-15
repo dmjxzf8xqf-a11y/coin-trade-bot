@@ -943,7 +943,7 @@ class Trader:
         notional = float(pos.get("last_order_usdt") or 0) * float(pos.get("last_lev") or 0)
         pnl_est = estimate_pnl_usdt(side, entry_price, price, notional)
         self.day_profit += pnl_est
-
+        _ai_record_pnl(pnl_est)
         self._trade_count_total += 1
         self._recent_results.append(pnl_est)
         if len(self._recent_results) > 30:
