@@ -89,3 +89,17 @@ def record_trade_result(pnl):
 
 def get_ai_stats():
     return _load_stats()
+_last_notified_winrate = 0
+
+def check_winrate_milestone():
+    global _last_notified_winrate
+    stats = get_ai_stats()
+
+    wr = stats["winrate"]
+
+    # 5% 단위 상승 알림
+    if wr >= _last_notified_winrate + 5 and stats["wins"] >= 20:
+        _last_notified_winrate = wr
+        return f"🤖 AI 진화 감지\n승률 상승 → {wr}%"
+
+    return None
