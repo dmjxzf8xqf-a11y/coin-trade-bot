@@ -1247,7 +1247,20 @@ qty = calc_position_size(balance, risk_pct, price, sl, lev)
 
         self._refresh_discovery()
         self._sync_real_positions()
+# 🧠 AI 패턴 학습 기반 전략 조정
+patterns = analyze_patterns()
 
+if patterns:
+    best_score = patterns.get("best_score", 65)
+    danger_rsi = patterns.get("danger_rsi", 40)
+
+    # 승률 높은 점수대 반영
+    if best_score > 70:
+        self.tune[self.mode]["enter_score"] = int(best_score - 5)
+
+    # 손실 많았던 RSI 구간 회피
+    if danger_rsi < 40:
+        self.state["avoid_low_rsi"] = True
         msg = check_winrate_milestone()
         if msg:
             self.notify(msg)
