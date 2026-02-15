@@ -146,37 +146,3 @@ if __name__ == "__main__":
     main()
 
 
-# ===== file: trader.py PATCH ONLY (네 기존 trader.py에 추가/수정할 부분) =====
-"""
-1) trader.py 상단 import 근처에 추가:
-----------------------------------
-try:
-    from apply_to_trader_patch import apply_to_trader
-except Exception:
-    def apply_to_trader(*args, **kwargs):
-        return (False, "apply_to_trader not available")
-
-
-2) mode_params()에 stop_atr / tp_r가 tune(overrides)에서 먹게 되어 있어야 함.
-(너 코드엔 이미 아래처럼 있음 → 그대로면 OK)
-----------------------------------
-"stop_atr": float(overrides.get("stop_atr", STOP_ATR_MULT_SAFE)),
-"tp_r": float(overrides.get("tp_r", TP_R_MULT_SAFE)),
-
-
-3) Trader.__init__ 맨 아래(초기화 끝나기 직전)에 1회 자동 적용:
-----------------------------------
-ok, msg = apply_to_trader(self, target_mode="SAFE")  # SAFE에 학습값 반영
-self.state["learn_apply"] = msg
-if ok:
-    self.notify_throttled(f"🧠 학습값 적용됨: {msg}", 120)
-
-
-4) (선택) 텔레그램 명령으로 수동 적용 (/learnapply):
-handle_command() 안에 추가:
-----------------------------------
-if c0 == "/learnapply":
-    ok, msg = apply_to_trader(self, target_mode=self.mode)
-    self.notify(f"🧠 learnapply: {ok} | {msg}")
-    return
-"""
