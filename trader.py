@@ -576,22 +576,27 @@ def compute_signal_and_exits(symbol: str, side: str, price: float, mp: dict):
         a = price * 0.005
         score = 50
         trend_ok = True
+
+        # ✅ BTC 방향 필터 (kline 역순 보정 필수)
         btc_kl = get_klines("BTCUSDT", ENTRY_INTERVAL, 50)
+        btc_kl = list(reversed(btc_kl))
         btc_closes = [float(x[4]) for x in btc_kl]
-        btc_ok = btc_closes[-1] > ema(btc_closes, 50)
+        btc_ok = btc_closes[-1] > ema(btc_closes[-60:], 50)
 
         if side == "LONG" and not btc_ok:
             return False, "BTC DOWN TREND", 0, None, None, a
 
         if side == "SHORT" and btc_ok:
             return False, "BTC UP TREND", 0, None, None, a
-    return False, "BTC TREND UP", 0, None, None, a
+
         stop_dist = a * mp["stop_atr"]
         tp_dist = stop_dist * mp["tp_r"]
-        sl = price - stop_dist if side=="LONG" else price + stop_dist
-        tp = price + tp_dist if side=="LONG" else price - tp_dist
+        sl = price - stop_dist if side == "LONG" else price + stop_dist
+        tp = price + tp_dist if side == "LONG" else price - tp_dist
+
+        enter_ok = score >= mp["enter_score"]
         reason = build_reason(symbol, side, price, ef, es, r, a, score, trend_ok, enter_ok) + "- note=kline 부족\n"
-        return False, reason, score, sl, tp, a
+        return False, reason, score, sl, tp, aa
 
     kl = list(reversed(kl))
     closes=[float(x[4]) for x in kl]
