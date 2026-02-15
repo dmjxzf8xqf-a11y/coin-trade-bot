@@ -585,7 +585,7 @@ def compute_signal_and_exits(symbol: str, side: str, price: float, mp: dict):
 
         if side == "SHORT" and btc_ok:
             return False, "BTC UP TREND", 0, None, None, a
-    return False, "BTC TREND UP", 0, None, None, aenter_ok = score >= mp["enter_score"]
+    return False, "BTC TREND UP", 0, None, None, a
         stop_dist = a * mp["stop_atr"]
         tp_dist = stop_dist * mp["tp_r"]
         sl = price - stop_dist if side=="LONG" else price + stop_dist
