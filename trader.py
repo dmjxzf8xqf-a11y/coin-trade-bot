@@ -598,16 +598,15 @@ def compute_signal_and_exits(symbol: str, side: str, price: float, mp: dict):
 if a is None: a = price * 0.005
 
     # 🔒 변동성 필터
-    if a / price < 0.002:
-        return False, "LOW VOLATILITY", 0, None, None, a
+if a / price < 0.002:
+    return False, "LOW VOLATILITY", 0, None, None, a
 
-    # 🚨 초고변동 차단
-    if a / price > 0.06:
-        return False, "EXTREME VOLATILITY", 0, None, None, a
+# 🚨 초고변동 차단
+if a / price > 0.06:
+    return False, "EXTREME VOLATILITY", 0, None, None, a
     score = ai_score(price, ef, es, r, a)
 
-if a / price < 0.002:
-    score -= 10
+
 
 enter_ok = score >= mp["enter_score"]
 
