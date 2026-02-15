@@ -478,7 +478,7 @@ def order_market(symbol: str, side: str, qty: float, reduce_only=False):
     if reduce_only:
         body["reduceOnly"] = True
 
-    resp = http.request("POST", "/v5/order/create", body)
+    resp = http.request("POST", "/v5/order/create", body, auth=True)
     if (resp or {}).get("retCode") != 0:
         raise Exception(f"ORDER FAILED: {resp}")
     return resp
