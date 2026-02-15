@@ -33,7 +33,31 @@ except Exception:
     pass
 
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-PROXY = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or ""
+import math
+import time
+
+def _to_float(x, default=0.0):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+def _round_down_to_step(x: float, step: float) -> float:
+    if step <= 0:
+        return x
+    return math.floor(x / step) * step
+
+def _decimals_from_step(step: float) -> int:
+    # step=0.001 -> 3, step=1 -> 0
+    s = f"{step:.16f}".rstrip("0").rstrip(".")
+    if "." not in s:
+        return 0
+    return len(s.split(".")[1])
+
+def _quantize(x: float, step: float) -> float:
+    # step 자리수에 맞춰 반올림 표시(서버 거부 방지)
+    d = _decimals_from_step(step)
+    return float(f"{x:.{d}f}") if d > 0 else float(int(x))PROXY = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or ""
 PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
 
 def _cfg(name, default):
