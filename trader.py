@@ -9,6 +9,7 @@ import os, time, json, hmac, hashlib, math, requests
 from urllib.parse import urlencode
 from datetime import datetime, timezone
 from ai_pattern_engine import analyze_patterns
+from ai_coin_performance import record, winrate
 # --- AI learn module (optional but recommended) ---
 try:
     from ai_learn import check_winrate_milestone, record_trade_result, get_ai_stats
