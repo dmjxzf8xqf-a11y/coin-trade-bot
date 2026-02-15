@@ -40,3 +40,52 @@ def update_result(win):
 
     save_state(state)
     return state["enter_score"]
+# =========================
+# AI PERFORMANCE TRACKER
+# =========================
+
+import json
+from datetime import datetime
+
+STATS_FILE = "ai_stats.json"
+
+
+def _load_stats():
+    try:
+        with open(STATS_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {
+            "wins": 0,
+            "losses": 0,
+            "trades": 0,
+            "winrate": 0,
+            "last_update": None,
+        }
+
+
+def _save_stats(stats):
+    with open(STATS_FILE, "w") as f:
+        json.dump(stats, f, indent=2)
+
+
+def record_trade_result(pnl):
+    stats = _load_stats()
+
+    stats["trades"] += 1
+
+    if pnl > 0:
+        stats["wins"] += 1
+    else:
+        stats["losses"] += 1
+
+    stats["winrate"] = round(
+        stats["wins"] / max(1, stats["trades"]) * 100, 2
+    )
+    stats["last_update"] = datetime.utcnow().isoformat()
+
+    _save_stats(stats)
+
+
+def get_ai_stats():
+    return _load_stats()
