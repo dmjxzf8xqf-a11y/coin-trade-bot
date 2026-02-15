@@ -54,12 +54,11 @@ def _decimals_from_step(step: float) -> int:
         return 0
     return len(s.split(".")[1])
 
-def _quantize(x: float, step: float) -> float:
-    # step 자리수에 맞춰 반올림 표시(서버 거부 방지)
+def _quantize(x: float, step: float):
     d = _decimals_from_step(step)
-    return float(f"{x:.{d}f}") if d > 0 else float(int(x))PROXY = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or ""
-PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
+    return float(f"{x:.{d}f}") if d > 0 else float(int(x))
 
+PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
 def _cfg(name, default):
     try:
         return globals()[name]
