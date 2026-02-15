@@ -1184,10 +1184,12 @@ class Trader:
         if self.state.get("entry_reason"):
             lines.append(f"🧠 근거:\n{self.state.get('entry_reason')}")
         if self.state.get("last_event"):
-            lines.append(f"📝 last={self.state.get('last_event')}")
-            stats = get_ai_stats()
+    lines.append(f"📝 last={self.state['last_event']}")
+
+stats = get_ai_stats()
 lines.append(f"🤖 AI Winrate: {stats['winrate']}% ({stats['wins']}W/{stats['losses']}L)")
-        return "\n".join(lines)
+
+return "\n".join(lines)
 
     # ---------------- manual controls ----------------
     def manual_enter(self, side: str):
