@@ -1186,9 +1186,9 @@ class Trader:
 
 if self.state.get("last_event"):
     lines.append(f"📝 last={self.state['last_event']}")
+
 stats = get_ai_stats()
 lines.append(f"🤖 AI Winrate: {stats['winrate']}% ({stats['wins']}W/{stats['losses']}L)")
-
 return "\n".join(lines)
 
     # ---------------- manual controls ----------------
