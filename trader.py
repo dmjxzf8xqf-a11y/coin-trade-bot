@@ -799,7 +799,12 @@ class Trader:
         lev = float(mp["lev"])
         order_usdt = float(mp["order_usdt"])
 
-        qty = qty_from_order_usdt(symbol, order_usdt, lev, price)
+        from risk_engine import calc_position_size
+
+balance = 1000  # 또는 잔고 API
+risk_pct = 1.0
+
+qty = calc_position_size(balance, risk_pct, price, sl, lev)
         if qty <= 0:
             raise Exception("qty<=0")
 
