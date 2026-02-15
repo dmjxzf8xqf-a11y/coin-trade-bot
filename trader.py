@@ -576,7 +576,7 @@ def compute_signal_and_exits(symbol: str, side: str, price: float, mp: dict):
         a = price * 0.005
         score = 50
         trend_ok = True
-         btc_kl = get_klines("BTCUSDT", ENTRY_INTERVAL, 50)
+        btc_kl = get_klines("BTCUSDT", ENTRY_INTERVAL, 50)
         btc_closes = [float(x[4]) for x in btc_kl]
         btc_ok = btc_closes[-1] > ema(btc_closes, 50)
 
