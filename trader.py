@@ -1349,45 +1349,50 @@ class Trader:
         self.state["last_event"] = f"HOLD {symbol} {side} score={score} stop={eff_stop:.6f} tp={pos.get('tp_price'):.6f}"
 
     # ---------------- main tick ----------------
-def tick(self):
+    def tick(self):
+        # ===== KILL SWITCH / COOLDOWN =====
+        if self._ks.in_cooldown():
+            return
 
-    # ===== KILL SWITCH / COOLDOWN =====
-    if self._ks.in_cooldown():
-        return
+        msg = self._ks.check_losses(getattr(self, "consec_losses", 0))
+        if msg:
+            self.notify(msg)
+            return
 
-    msg = self._ks.check_losses(getattr(self, "consec_losses", 0))
-    if msg:
-        self.notify(msg)
-        return
+        msg = self._ks.check_daily_pnl(getattr(self, "daily_pnl", 0.0))
+        if msg:
+            self.notify(msg)
+            return
 
-    msg = self._ks.check_daily_pnl(getattr(self, "daily_pnl", 0.0))
-    if msg:
-        self.notify(msg)
-        return
+        self._reset_day()
 
-    self._reset_day()
+        # health/state
+        self.state["trading_enabled"] = self.trading_enabled
+        self.state["mode"] = self.mode
+        self.state["bybit_base"] = BYBIT_BASE_URL
+        self.state["proxy"] = "ON" if PROXIES else "OFF"
 
-    self.state["trading_enabled"] = self.trading_enabled
-    self.state["mode"] = self.mode
-    self.state["bybit_base"] = BYBIT_BASE_URL
-    self.state["proxy"] = "ON" if PROXIES else "OFF"
+        if not self.trading_enabled:
+            self.state["last_event"] = "거래 OFF"
+            return
 
-    if not self.trading_enabled:
-        self.state["last_event"] = "거래 OFF"
-        return
+        if getattr(self, "consec_losses", 0) >= MAX_CONSEC_LOSSES:
+            self.notify_throttled("🛑 연속 손실 제한 도달. 거래 중지")
+            self.trading_enabled = False
+            self.state["last_event"] = "STOP: consec losses"
+            return
 
-    if self.consec_losses >= MAX_CONSEC_LOSSES:
-        self.notify_throttled("🛑 연속 손실 제한 도달. 거래 중지")
-        self.trading_enabled = False
-        self.state["last_event"] = "STOP: consec losses"
-        return
-
+        # discovery + exchange sync
         self._refresh_discovery()
         self._sync_real_positions()
 
-        msg = check_winrate_milestone()
-        if msg:
-            self.notify(msg)
+        # milestone notify (optional)
+        try:
+            msg = check_winrate_milestone()
+            if msg:
+                self.notify(msg)
+        except Exception:
+            pass
 
         # manage open positions first
         if self.positions:
@@ -1397,25 +1402,29 @@ def tick(self):
                 except Exception as e:
                     self.err_throttled(f"❌ manage 실패: {e}")
             return
-    # ===== runtime persist =====
-    try:
-        atomic_write_json(data_path("runtime_state.json"), {
-            "consec_losses": int(getattr(self, "consec_losses", 0) or 0),
-            "ts": int(time.time()),
-        })
-        atomic_write_json(data_path("daily_pnl.json"), {
-            "pnl": float(getattr(self, "daily_pnl", 0.0) or 0.0),
-            "ts": int(time.time()),
-        })
-    except Exception:
-        pass
+
+        # ===== runtime persist =====
+        try:
+            atomic_write_json(data_path("runtime_state.json"), {
+                "consec_losses": int(getattr(self, "consec_losses", 0) or 0),
+                "ts": int(time.time()),
+            })
+            atomic_write_json(data_path("daily_pnl.json"), {
+                "pnl": float(getattr(self, "daily_pnl", 0.0) or 0.0),
+                "ts": int(time.time()),
+            })
+        except Exception:
+            pass
+
         # entry gating
-        if time.time() < self._cooldown_until:
+        if time.time() < getattr(self, "_cooldown_until", 0):
             self.state["last_event"] = "대기: cooldown"
             return
-        if self._day_entries >= MAX_ENTRIES_PER_DAY:
+
+        if getattr(self, "_day_entries", 0) >= MAX_ENTRIES_PER_DAY:
             self.state["last_event"] = "대기: 일일 진입 제한"
             return
+
         if not entry_allowed_now_utc():
             self.state["last_event"] = f"대기: 시간필터(UTC {TRADE_HOURS_UTC})"
             return
@@ -1427,13 +1436,16 @@ def tick(self):
                 price = get_price(symbol)
                 info = self._score_symbol(symbol, price)
                 self.state["entry_reason"] = info.get("reason")
+
                 if not info.get("ok"):
                     self.state["last_event"] = f"대기: {symbol} not ok"
                     return
+
                 mp = self._mp()
                 if int(info.get("score", 0)) < int(mp["enter_score"]):
                     self.state["last_event"] = f"대기: score={info.get('score')}"
                     return
+
                 self._enter(symbol, info["side"], price, info["reason"], info["sl"], info["tp"])
                 self.state["last_event"] = f"ENTER {symbol} {info['side']}"
             except Exception as e:
