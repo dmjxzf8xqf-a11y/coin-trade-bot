@@ -842,28 +842,35 @@ class Trader:
         order_usdt = float(mp["order_usdt"])
 
         # qty 계산: 기본은 USDT*lev / price
-        qty = float(order_usdt) / float(price)
+        qty = (order_usdt * lev) / float(price)
 
-step, min_qty = self._get_lot_size(symbol)
+        step, min_qty = self._get_lot_size(symbol)
 
-# step 단위 맞춤
-qty = math.floor(qty / step) * step
+        # step 단위 맞춤
+        qty = math.floor(qty / step) * step
 
-# 최소 주문 수량 보정
-if qty < min_qty:
-    qty = min_qty
+        # 최소 주문 수량 보정
+        if qty < min_qty:
+            qty = min_qty
 
-# optional: risk_engine 사용
-if USE_RISK_ENGINE and (calc_position_size is not None):
+        # optional: risk_engine 사용 (있을 때만)
+        if USE_RISK_ENGINE and (calc_position_size is not None):
             try:
-                # balance는 env로 주면 사용, 안 주면 fallback 유지
+                # balance는 env로 주면 사용, 안 주면 USDT 잔고 조회
                 if BALANCE_USDT_ENV.strip():
-                    balance = float(BALANCE_USDT_ENV)
-                    qty2 = float(calc_position_size(balance, float(RISK_PCT), float(price), float(sl), float(lev)))
-                    if qty2 > 0:
-                        qty = qty2
+                    balance = float(BALANCE_USDT_ENV.strip())
+                else:
+                    balance = float(self._get_usdt_balance())
+
+                qty2 = float(calc_position_size(symbol, float(price), balance, lev))
+                if qty2 > 0:
+                    # risk_engine도 lot 규칙 맞추기
+                    qty2 = math.floor(qty2 / step) * step
+                    if qty2 < min_qty:
+                        qty2 = min_qty
+                    qty = qty2
             except Exception as e:
-                self.err_throttled(f"⚠️ risk_engine 실패(기본 qty로 진행): {e}")
+                self.err_throttled(f"⚠️ risk_engine 실패: {e}")
 
         if qty <= 0:
             raise Exception("qty<=0")
