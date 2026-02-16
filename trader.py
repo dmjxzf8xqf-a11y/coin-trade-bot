@@ -1124,7 +1124,10 @@ class Trader:
             return
 
         if c0 == "/status":
+            try:
             self.notify(self.status_text())
+            except Exception as e:
+            self.notify(f"❌ status error: {e}")
             return
 
         if c0 == "/buy":
