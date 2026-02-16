@@ -661,7 +661,20 @@ class Trader:
         self.consec_losses = 0
         self._day_key = None
         self._day_entries = 0
+        # ===== FINAL 안정성 세트 =====
+        self._ks = KillSwitch()
+        self._idempo = {}  # {key: ts}
+        self._idempo_ttl = int(os.getenv("IDEMPO_TTL", "120"))  # 2분
 
+        # 일일 PnL(간단 집계) - 너의 실현손익 기록 방식에 맞춰 trader 내부에서 업데이트하면 됨
+        self.daily_pnl = float(safe_read_json(data_path("daily_pnl.json"), {"pnl": 0.0}).get("pnl", 0.0))
+
+        # 재시작해도 연속손실/기타 유지하고 싶으면 여기서 로드
+        persisted = safe_read_json(data_path("runtime_state.json"), {})
+        try:
+            self.consec_losses = int(persisted.get("consec_losses", getattr(self, "consec_losses", 0)) or 0)
+        except Exception:
+            pass
         # --- cooldown / throttles ---
         self._cooldown_until = 0
         self._last_alert_ts = 0
