@@ -652,6 +652,27 @@ class Trader:
         }
 
         self.positions = []  # dict list
+        # --- stats / day reset ---
+        self.win = 0
+        self.loss = 0
+        self.day_profit = 0.0
+        self.consec_losses = 0
+        self._day_key = None
+        self._day_entries = 0
+
+        # --- cooldown / throttles ---
+        self._cooldown_until = 0
+        self._last_alert_ts = 0
+        self._last_err_ts = 0
+
+        # --- leverage cache ---
+        self._lev_set_cache = {}
+
+        # --- scan ---
+        self._last_scan_ts = 0
+
+        # --- option flags ---
+        self.state.setdefault("avoid_low_rsi", False)    
     def _get_lot_size(self, symbol):
     if symbol in _lot_cache:
         return _lot_cache[symbol]
