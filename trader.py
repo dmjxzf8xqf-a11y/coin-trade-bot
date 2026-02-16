@@ -1349,8 +1349,23 @@ class Trader:
         self.state["last_event"] = f"HOLD {symbol} {side} score={score} stop={eff_stop:.6f} tp={pos.get('tp_price'):.6f}"
 
     # ---------------- main tick ----------------
-    def tick(self):
-        self._reset_day()
+def tick(self):
+
+    # ===== KILL SWITCH / COOLDOWN =====
+    if self._ks.in_cooldown():
+        return
+
+    msg = self._ks.check_losses(getattr(self, "consec_losses", 0))
+    if msg:
+        self.notify(msg)
+        return
+
+    msg = self._ks.check_daily_pnl(getattr(self, "daily_pnl", 0.0))
+    if msg:
+        self.notify(msg)
+        return
+
+    self._reset_day()
 
         self.state["trading_enabled"] = self.trading_enabled
         self.state["mode"] = self.mode
