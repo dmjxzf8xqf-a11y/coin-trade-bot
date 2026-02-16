@@ -652,7 +652,21 @@ class Trader:
         }
 
         self.positions = []  # dict list
+    def _get_lot_size(self, symbol):
+        """Bybit 최소 주문수량/스텝 조회"""
+        if symbol in _lot_cache:
+            return _lot_cache[symbol]
 
+        try:
+            r = self._req("GET", "/v5/market/instruments-info",
+                          params={"category": CATEGORY, "symbol": symbol})
+            info = r["result"]["list"][0]["lotSizeFilter"]
+            step = float(info["qtyStep"])
+            min_qty = float(info["minOrderQty"])
+            _lot_cache[symbol] = (step, min_qty)
+            return step, min_qty
+        except Exception:
+            return 0.01, 0.01
         self.win = 0
         self.loss = 0
         self.day_profit = 0.0
