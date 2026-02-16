@@ -850,7 +850,7 @@ step, min_qty = self._get_lot_size(symbol)
 qty = math.floor(qty / step) * step
 
 # 최소 주문 수량 보정
-if qty < min_qty:
+        if qty < min_qty:
     qty = min_qty
 
         # optional: risk_engine 사용 (있을 때만)
