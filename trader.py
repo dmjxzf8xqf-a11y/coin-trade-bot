@@ -666,19 +666,7 @@ class Trader:
         return step, min_qty
     except Exception:
         return 0.01, 0.01
-        self.loss = 0
-        self.day_profit = 0.0
-        self.consec_losses = 0
-        self._day_key = None
-        self._day_entries = 0
-
-        self._cooldown_until = 0
-        self._last_alert_ts = 0
-        self._last_err_ts = 0
-        self._lev_set_cache = {}
-
-        self._last_scan_ts = 0
-
+    
         # optional: RSI 회피 플래그(원하면 /status로 확인 가능)
         self.state.setdefault("avoid_low_rsi", False)
 
