@@ -674,19 +674,23 @@ class Trader:
         # --- option flags ---
         self.state.setdefault("avoid_low_rsi", False)    
     def _get_lot_size(self, symbol):
-    if symbol in _lot_cache:
-        return _lot_cache[symbol]
+        # Bybit 최소 주문수량/스텝 조회
+        if symbol in _lot_cache:
+            return _lot_cache[symbol]
 
-    try:
-        r = self._req("GET", "/v5/market/instruments-info",
-                      params={"category": CATEGORY, "symbol": symbol})
-        info = r["result"]["list"][0]["lotSizeFilter"]
-        step = float(info["qtyStep"])
-        min_qty = float(info["minOrderQty"])
-        _lot_cache[symbol] = (step, min_qty)
-        return step, min_qty
-    except Exception:
-        return 0.01, 0.01
+        try:
+            r = self._req(
+                "GET",
+                "/v5/market/instruments-info",
+                params={"category": CATEGORY, "symbol": symbol},
+            )
+            info = r["result"]["list"][0]["lotSizeFilter"]
+            step = float(info["qtyStep"])
+            min_qty = float(info["minOrderQty"])
+            _lot_cache[symbol] = (step, min_qty)
+            return step, min_qty
+        except Exception:
+            return 0.01, 0.01
     
         # optional: RSI 회피 플래그(원하면 /status로 확인 가능)
         self.state.setdefault("avoid_low_rsi", False)
