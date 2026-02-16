@@ -1397,7 +1397,18 @@ def tick(self):
                 except Exception as e:
                     self.err_throttled(f"❌ manage 실패: {e}")
             return
-
+    # ===== runtime persist =====
+    try:
+        atomic_write_json(data_path("runtime_state.json"), {
+            "consec_losses": int(getattr(self, "consec_losses", 0) or 0),
+            "ts": int(time.time()),
+        })
+        atomic_write_json(data_path("daily_pnl.json"), {
+            "pnl": float(getattr(self, "daily_pnl", 0.0) or 0.0),
+            "ts": int(time.time()),
+        })
+    except Exception:
+        pass
         # entry gating
         if time.time() < self._cooldown_until:
             self.state["last_event"] = "대기: cooldown"
