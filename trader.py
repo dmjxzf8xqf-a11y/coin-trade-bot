@@ -1123,11 +1123,11 @@ class Trader:
             self.notify(f"🧠 avoid_low_rsi={self.state['avoid_low_rsi']}")
             return
 
-        if c0 == "/status":
+                if c0 == "/status":
             try:
-            self.notify(self.status_text())
+                self.notify(self.status_text())
             except Exception as e:
-            self.notify(f"❌ status error: {e}")
+                self.notify(f"❌ status error: {e}")
             return
 
         if c0 == "/buy":
