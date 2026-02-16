@@ -1367,20 +1367,20 @@ def tick(self):
 
     self._reset_day()
 
-        self.state["trading_enabled"] = self.trading_enabled
-        self.state["mode"] = self.mode
-        self.state["bybit_base"] = BYBIT_BASE_URL
-        self.state["proxy"] = "ON" if PROXIES else "OFF"
+    self.state["trading_enabled"] = self.trading_enabled
+    self.state["mode"] = self.mode
+    self.state["bybit_base"] = BYBIT_BASE_URL
+    self.state["proxy"] = "ON" if PROXIES else "OFF"
 
-        if not self.trading_enabled:
-            self.state["last_event"] = "거래 OFF"
-            return
+    if not self.trading_enabled:
+        self.state["last_event"] = "거래 OFF"
+        return
 
-        if self.consec_losses >= MAX_CONSEC_LOSSES:
-            self.notify_throttled("🛑 연속 손실 제한 도달. 거래 중지")
-            self.trading_enabled = False
-            self.state["last_event"] = "STOP: consec losses"
-            return
+    if self.consec_losses >= MAX_CONSEC_LOSSES:
+        self.notify_throttled("🛑 연속 손실 제한 도달. 거래 중지")
+        self.trading_enabled = False
+        self.state["last_event"] = "STOP: consec losses"
+        return
 
         self._refresh_discovery()
         self._sync_real_positions()
