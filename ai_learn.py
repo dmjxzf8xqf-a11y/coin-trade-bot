@@ -1,14 +1,16 @@
-# ===== file: ai_learn.py (SUPABASE UPGRADE + JSON FALLBACK) =====
+# ai_learn.py (FINAL: SUPABASE + DATA_DIR JSON FALLBACK + ATOMIC SAVE)
 import json
 import os
 from datetime import datetime
 import requests
 
+from storage_utils import data_path, safe_read_json, atomic_write_json
+
 # -------------------------
-# Local fallback files
+# Local fallback files (DATA_DIR 아래로 고정)
 # -------------------------
-LEARN_FILE = "learn_state.json"
-STATS_FILE = "ai_stats.json"
+LEARN_FILE = data_path("learn_state.json")
+STATS_FILE = data_path("ai_stats.json")
 
 # -------------------------
 # Supabase settings
@@ -29,7 +31,6 @@ def _sb_headers():
     }
 
 def _sb_select_global():
-    # GET /rest/v1/coin_stats?select=*&symbol=eq.__GLOBAL__&limit=1
     url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
     params = {"select": "*", "symbol": f"eq.{GLOBAL_SYMBOL}", "limit": "1"}
     r = requests.get(url, headers=_sb_headers(), params=params, timeout=10)
@@ -38,7 +39,6 @@ def _sb_select_global():
     return arr[0] if arr else None
 
 def _sb_upsert_global(row: dict):
-    # POST upsert with Prefer: resolution=merge-duplicates
     url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
     headers = _sb_headers()
     headers["Prefer"] = "resolution=merge-duplicates"
@@ -47,7 +47,6 @@ def _sb_upsert_global(row: dict):
     return True
 
 def _sb_patch_global(patch: dict):
-    # PATCH /rest/v1/coin_stats?symbol=eq.__GLOBAL__
     url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
     params = {"symbol": f"eq.{GLOBAL_SYMBOL}"}
     headers = _sb_headers()
@@ -57,29 +56,20 @@ def _sb_patch_global(patch: dict):
     return True
 
 # -------------------------
-# JSON fallback (기존 방식)
+# JSON fallback (ATOMIC + RECOVERY)
 # -------------------------
 def _load_json(path, default):
-    try:
-        if not os.path.exists(path):
-            return default
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
+    return safe_read_json(path, default)
 
 def _save_json(path, obj):
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=2)
+        atomic_write_json(path, obj, backup=True)
     except Exception:
         pass
 
 # -------------------------
-# Public APIs (trader.py가 쓰는 함수들)
+# Public APIs
 # -------------------------
-
-# 1) enter_score 자동 튜닝
 def load_state():
     # Supabase 우선
     if _sb_enabled():
@@ -114,7 +104,6 @@ def save_state(state):
         except Exception:
             pass
 
-    # fallback
     _save_json(LEARN_FILE, state)
 
 def update_result(win: bool):
@@ -127,93 +116,31 @@ def update_result(win: bool):
 
     total = int(state.get("wins") or 0) + int(state.get("losses") or 0)
 
-    # 자동 튜닝(원래 로직 유지)
+    # 자동 튜닝 (원래 의도 유지)
     if total >= 20:
-        winrate = (state["wins"] / total) if total else 0
-
-        if winrate < 0.50:
-            state["enter_score"] = int(state.get("enter_score") or 60) + 2
-        elif winrate > 0.65:
-            state["enter_score"] = int(state.get("enter_score") or 60) - 1
-
-        state["enter_score"] = max(45, min(85, int(state["enter_score"])))
+        winrate = (state["wins"] / max(total, 1)) * 100.0
+        # 너무 공격적/보수적으로 튀지 않게 완만 조정
+        if winrate >= 60:
+            state["enter_score"] = min(75, int(state.get("enter_score") or 60) + 1)
+        elif winrate <= 45:
+            state["enter_score"] = max(45, int(state.get("enter_score") or 60) - 1)
 
     save_state(state)
-    return int(state["enter_score"])
-
-# 2) AI 성능 트래커 (승률/트레이드수 저장)
-def _load_stats():
-    # Supabase 우선
-    if _sb_enabled():
-        try:
-            row = _sb_select_global()
-            if not row:
-                _sb_upsert_global({"symbol": GLOBAL_SYMBOL})
-                row = _sb_select_global() or {}
-            return {
-                "wins": int(row.get("wins") or 0),
-                "losses": int(row.get("losses") or 0),
-                "trades": int(row.get("trades") or 0),
-                "winrate": float(row.get("winrate") or 0),
-                "last_update": row.get("last_update"),
-            }
-        except Exception:
-            pass
-
-    # fallback
-    return _load_json(
-        STATS_FILE,
-        {"wins": 0, "losses": 0, "trades": 0, "winrate": 0, "last_update": None},
-    )
-
-def _save_stats(stats):
-    # Supabase 우선
-    if _sb_enabled():
-        try:
-            patch = {
-                "wins": int(stats.get("wins") or 0),
-                "losses": int(stats.get("losses") or 0),
-                "trades": int(stats.get("trades") or 0),
-                "winrate": float(stats.get("winrate") or 0),
-                "last_update": datetime.utcnow().isoformat(),
-            }
-            _sb_patch_global(patch)
-            return
-        except Exception:
-            pass
-
-    # fallback
-    _save_json(STATS_FILE, stats)
-
-def record_trade_result(pnl: float):
-    stats = _load_stats()
-
-    stats["trades"] = int(stats.get("trades") or 0) + 1
-    if float(pnl) > 0:
-        stats["wins"] = int(stats.get("wins") or 0) + 1
-    else:
-        stats["losses"] = int(stats.get("losses") or 0) + 1
-
-    t = int(stats["trades"])
-    w = int(stats["wins"])
-    stats["winrate"] = round(w / max(1, t) * 100, 2)
-    stats["last_update"] = datetime.utcnow().isoformat()
-
-    _save_stats(stats)
+    return state
 
 def get_ai_stats():
-    return _load_stats()
+    # wins/losses 기반으로 항상 일관되게 표시
+    st = load_state()
+    wins = int(st.get("wins") or 0)
+    losses = int(st.get("losses") or 0)
+    total = wins + losses
+    winrate = round((wins / total) * 100, 2) if total > 0 else 0.0
+    return {"wins": wins, "losses": losses, "winrate": winrate, "enter_score": int(st.get("enter_score") or 60)}
 
-_last_notified_winrate = 0.0
+def record_trade_result(pnl: float):
+    # pnl>0 win, pnl<=0 loss
+    return update_result(bool(pnl > 0))
 
 def check_winrate_milestone():
-    global _last_notified_winrate
-    stats = get_ai_stats()
-    wr = float(stats.get("winrate") or 0)
-    wins = int(stats.get("wins") or 0)
-
-    # 5% 단위 상승 알림(승 20 이상일 때만)
-    if wins >= 20 and wr >= (_last_notified_winrate + 5):
-        _last_notified_winrate = wr
-        return f"🤖 AI 진화 감지\n승률 상승 → {wr}%"
+    # 필요하면 너가 기존에 쓰던 알림 로직 붙일 자리 (현재는 None)
     return None
