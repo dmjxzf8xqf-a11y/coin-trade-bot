@@ -842,7 +842,16 @@ class Trader:
         order_usdt = float(mp["order_usdt"])
 
         # qty 계산: 기본은 USDT*lev / price
-        qty = qty_from_order_usdt(symbol, order_usdt, lev, price)
+        qty = float(order_usdt) / float(price)
+
+step, min_qty = self._get_lot_size(symbol)
+
+# step 단위 맞춤
+qty = math.floor(qty / step) * step
+
+# 최소 주문 수량 보정
+if qty < min_qty:
+    qty = min_qty
 
         # optional: risk_engine 사용 (있을 때만)
         if USE_RISK_ENGINE and (calc_position_size is not None):
