@@ -850,11 +850,11 @@ step, min_qty = self._get_lot_size(symbol)
 qty = math.floor(qty / step) * step
 
 # 최소 주문 수량 보정
-        if qty < min_qty:
+if qty < min_qty:
     qty = min_qty
 
-        # optional: risk_engine 사용 (있을 때만)
-        if USE_RISK_ENGINE and (calc_position_size is not None):
+# optional: risk_engine 사용
+if USE_RISK_ENGINE and (calc_position_size is not None):
             try:
                 # balance는 env로 주면 사용, 안 주면 fallback 유지
                 if BALANCE_USDT_ENV.strip():
