@@ -53,3 +53,17 @@ SCALE_REF_USDT = float(os.getenv("SCALE_REF_USDT", "50"))   # 잔고 50USDT를 �
 SCALE_MIN = float(os.getenv("SCALE_MIN", "0.5"))
 SCALE_MAX = float(os.getenv("SCALE_MAX", "2.0"))
 SCALE_SMOOTH = float(os.getenv("SCALE_SMOOTH", "0.5"))      # 0~1 (높을수록 부드럽게 변화)
+# ===== AUTO OPTIMIZATION =====
+AUTO_OPTIMIZE = True
+OPTIMIZE_INTERVAL_HOURS = 24
+
+# ===== SAFETY =====
+MAX_CONSECUTIVE_LOSSES = 4
+MAX_DRAWDOWN_PERCENT = 12
+
+# ===== MARKET REGIME =====
+ENABLE_REGIME_FILTER = True
+
+# ===== POSITION RISK =====
+RISK_PER_TRADE = 0.02   # 2%
+VOLATILITY_ADJUST = True
