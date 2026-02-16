@@ -16,7 +16,8 @@ import math
 import requests
 from urllib.parse import urlencode
 from datetime import datetime, timezone
-
+# ===== LOT SIZE CACHE =====
+_lot_cache = {}
 # --- optional AI learn module ---
 try:
     from ai_learn import check_winrate_milestone, record_trade_result, get_ai_stats
