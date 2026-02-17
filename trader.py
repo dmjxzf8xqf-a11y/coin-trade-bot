@@ -1496,3 +1496,406 @@ class Trader:
             "avoid_low_rsi": bool(self.state.get("avoid_low_rsi", False)),
             "use_risk_engine": bool(USE_RISK_ENGINE and calc_position_size is not None),
         }
+# ======================================================================
+# FINAL 10/10 PATCH (ONE-PASTE) - Append to the VERY END of trader.py
+# - Exchange-level idempotency (orderLinkId) + order confirm loop
+# - Auto reconcile real positions on startup/tick (no more "internal empty")
+# - Range-regime filter (skip entries in sideways regime)
+# - Correlation exposure guard (avoid "fake diversification")
+# - Persist more runtime settings across restarts
+# ======================================================================
+
+import uuid as _uuid
+
+# ----------------------------
+# ENV knobs (safe defaults)
+# ----------------------------
+FINAL10_ON = str(os.getenv("FINAL10_ON", "true")).lower() in ("1","true","yes","y","on")
+
+# Regime filter: skip entries if EMA_slow slope is too flat (sideways)
+REGIME_FILTER_ON = str(os.getenv("REGIME_FILTER_ON", "true")).lower() in ("1","true","yes","y","on")
+REGIME_LOOKBACK = int(os.getenv("REGIME_LOOKBACK", "20"))            # bars back to measure slope
+REGIME_MIN_SLOPE_BPS = float(os.getenv("REGIME_MIN_SLOPE_BPS", "6")) # 6 bps (~0.06%) over lookback -> trend-ish
+
+# Correlation groups: prevent multiple positions in same "moves-together" bucket
+# Format: "BTCUSDT|ETHUSDT|SOLUSDT;XRPUSDT|ADAUSDT" (semicolon = group)
+CORR_GROUPS = os.getenv("CORR_GROUPS", "BTCUSDT|ETHUSDT|SOLUSDT")
+CORR_GUARD_ON = str(os.getenv("CORR_GUARD_ON", "true")).lower() in ("1","true","yes","y","on")
+
+# Order confirm loop
+CONFIRM_TRIES = int(os.getenv("ORDER_CONFIRM_TRIES", "12"))
+CONFIRM_SLEEP = float(os.getenv("ORDER_CONFIRM_SLEEP", "0.5"))
+
+# Persist more settings
+PERSIST_MORE_STATE = str(os.getenv("PERSIST_MORE_STATE", "true")).lower() in ("1","true","yes","y","on")
+
+def _final10_parse_corr_groups(spec: str):
+    groups = []
+    try:
+        for g in (spec or "").split(";"):
+            g = g.strip()
+            if not g:
+                continue
+            syms = [x.strip().upper() for x in g.split("|") if x.strip()]
+            if syms:
+                groups.append(set(syms))
+    except Exception:
+        pass
+    return groups
+
+_FINAL10_CORR_GROUPS = _final10_parse_corr_groups(CORR_GROUPS)
+
+def _final10_regime_slope_bps(symbol: str):
+    """
+    Returns slope in bps of EMA_slow over REGIME_LOOKBACK bars.
+    If data insufficient, returns None (do not block).
+    """
+    try:
+        kl = get_klines(symbol, ENTRY_INTERVAL, max(KLINE_LIMIT, EMA_SLOW * 3 + REGIME_LOOKBACK + 10))
+        if not kl or len(kl) < (EMA_SLOW * 3 + REGIME_LOOKBACK + 5):
+            return None
+        kl = list(reversed(kl))
+        closes = [float(x[4]) for x in kl]
+        # EMA slow now vs EMA slow (lookback) bars ago
+        es_now = ema(closes[-EMA_SLOW * 3 :], EMA_SLOW)
+        es_old = ema(closes[-(EMA_SLOW * 3 + REGIME_LOOKBACK) : -REGIME_LOOKBACK], EMA_SLOW)
+        if es_old <= 0:
+            return None
+        slope_bps = abs((es_now - es_old) / es_old) * 10000.0
+        return slope_bps
+    except Exception:
+        return None
+
+def _final10_confirm_order(symbol: str, order_id: str = None, order_link_id: str = None):
+    """
+    Confirm order final status via /v5/order/realtime.
+    Returns: ("Filled"/"Rejected"/"Cancelled"/"Unknown", raw_order_dict_or_None)
+    """
+    if DRY_RUN:
+        return ("Filled", {"dry_run": True})
+    last = None
+    for _ in range(max(1, CONFIRM_TRIES)):
+        try:
+            params = {"category": CATEGORY, "symbol": symbol}
+            if order_id:
+                params["orderId"] = order_id
+            if order_link_id:
+                params["orderLinkId"] = order_link_id
+            j = http.request("GET", "/v5/order/realtime", params, auth=True)
+            lst = (j.get("result") or {}).get("list") or []
+            if lst:
+                o = lst[0]
+                last = o
+                st = (o.get("orderStatus") or "").strip()
+                if st in ("Filled", "Rejected", "Cancelled"):
+                    return (st, o)
+        except Exception:
+            pass
+        time.sleep(CONFIRM_SLEEP)
+    return ("Unknown", last)
+
+# ----------------------------
+# ORDER: Exchange-level idempotency + confirm loop
+# This redefines the global order_market() used by Trader._enter/_close_qty
+# ----------------------------
+def order_market(symbol: str, side: str, qty: float, reduce_only=False):
+    if not FINAL10_ON:
+        # fallback to original behavior if disabled
+        if DRY_RUN:
+            return {"retCode": 0, "retMsg": "DRY_RUN"}
+        qty = fix_qty(qty, symbol)
+        body = {
+            "category": CATEGORY,
+            "symbol": symbol,
+            "side": side,
+            "orderType": "Market",
+            "qty": str(qty),
+            "timeInForce": "IOC",
+        }
+        if reduce_only:
+            body["reduceOnly"] = True
+        resp = http.request("POST", "/v5/order/create", body, auth=True)
+        if (resp or {}).get("retCode") != 0:
+            raise Exception(f"ORDER FAILED: {resp}")
+        return resp
+
+    if DRY_RUN:
+        return {"retCode": 0, "retMsg": "DRY_RUN"}
+
+    qty = fix_qty(qty, symbol)
+
+    # Use orderLinkId so retries won't duplicate orders at exchange level.
+    order_link_id = f"bot-{int(time.time()*1000)}-{_uuid.uuid4().hex[:10]}"
+
+    body = {
+        "category": CATEGORY,
+        "symbol": symbol,
+        "side": side,
+        "orderType": "Market",
+        "qty": str(qty),
+        "timeInForce": "IOC",
+        "orderLinkId": order_link_id,
+    }
+    if reduce_only:
+        body["reduceOnly"] = True
+
+    # 1) Create
+    resp = http.request("POST", "/v5/order/create", body, auth=True)
+    ret = str((resp or {}).get("retCode", "0"))
+    if ret != "0":
+        raise Exception(f"ORDER CREATE FAILED: {resp}")
+
+    oid = (resp.get("result") or {}).get("orderId")
+
+    # 2) Confirm (by orderId first, fallback by orderLinkId)
+    st, od = _final10_confirm_order(symbol, order_id=oid, order_link_id=order_link_id)
+    if st == "Filled":
+        return resp
+    if st in ("Rejected", "Cancelled"):
+        raise Exception(f"ORDER {st}: {od or resp}")
+
+    # 3) Unknown -> last chance by link id
+    st2, od2 = _final10_confirm_order(symbol, order_id=None, order_link_id=order_link_id)
+    if st2 == "Filled":
+        return resp
+    if st2 in ("Rejected", "Cancelled"):
+        raise Exception(f"ORDER {st2}: {od2 or resp}")
+
+    # If still unknown, treat as failure (safer than assuming filled)
+    raise Exception(f"ORDER STATUS UNKNOWN (safer stop): symbol={symbol} side={side} qty={qty} linkId={order_link_id}")
+
+# ----------------------------
+# Trader patches (monkey patch)
+# - reconcile real positions into internal state
+# - regime filter + corr guard before entry
+# - persist more settings
+# ----------------------------
+def _final10_reconcile_into_internal(self):
+    """
+    If exchange has open positions but self.positions is empty (or missing some),
+    import them and compute stop/tp using current logic so bot can manage/exits.
+    """
+    if DRY_RUN:
+        return
+    try:
+        plist = get_positions_all()
+        real = []
+        for p in plist:
+            size = float(p.get("size") or 0)
+            if size == 0:
+                continue
+            sym = (p.get("symbol") or "").upper()
+            side = "LONG" if (p.get("side") == "Buy") else "SHORT"
+            entry = float(p.get("avgPrice") or p.get("entryPrice") or 0)
+            real.append({"symbol": sym, "side": side, "size": size, "entry_price": entry})
+
+        # Keep for /health visibility
+        self.state["real_positions"] = real[:8]
+
+        # Build a lookup for existing internal positions
+        existing = set()
+        for pos in (self.positions or []):
+            existing.add(((pos.get("symbol") or "").upper(), pos.get("side")))
+
+        # Import missing ones
+        imported = 0
+        for rp in real:
+            key = (rp["symbol"], rp["side"])
+            if key in existing:
+                continue
+
+            price = get_price(rp["symbol"])
+            mp = self._mp()
+            ok, reason, score, sl, tp, a = compute_signal_and_exits(
+                rp["symbol"], rp["side"], price, mp, avoid_low_rsi=bool(self.state.get("avoid_low_rsi", False))
+            )
+
+            # If we couldn't compute sl/tp, fall back to conservative ATR-based from current price
+            if sl is None or tp is None:
+                # crude fallback using ATR% if 'a' missing
+                a = a if (a is not None and a > 0) else price * 0.01
+                stop_dist = a * mp["stop_atr"]
+                tp_dist = stop_dist * mp["tp_r"]
+                if rp["side"] == "LONG":
+                    sl = price - stop_dist
+                    tp = price + tp_dist
+                else:
+                    sl = price + stop_dist
+                    tp = price - tp_dist
+
+            tp1_price = None
+            if PARTIAL_TP_ON:
+                if rp["side"] == "LONG":
+                    tp1_price = price + (tp - price) * TP1_FRACTION
+                else:
+                    tp1_price = price - (price - tp) * TP1_FRACTION
+
+            self.positions.append({
+                "symbol": rp["symbol"],
+                "side": rp["side"],
+                "entry_price": rp["entry_price"] if rp["entry_price"] > 0 else price,
+                "entry_ts": time.time(),  # unknown original ts -> set now (safe for management)
+                "stop_price": sl,
+                "tp_price": tp,
+                "trail_price": None,
+                "tp1_price": tp1_price,
+                "tp1_done": False,
+                "last_order_usdt": None,
+                "last_lev": None,
+                "imported_from_exchange": True,
+            })
+            imported += 1
+
+        if imported > 0:
+            self.notify_throttled(f"🔄 실계정 포지션 {imported}개 자동-import 완료 (재시작/불일치 복구)", 120)
+
+    except Exception as e:
+        self.state["reconcile_error"] = str(e)
+
+def _final10_corr_guard_block(self, symbol: str):
+    if not (CORR_GUARD_ON and _FINAL10_CORR_GROUPS):
+        return None
+    sym = (symbol or "").upper()
+    held = set()
+    for p in (self.positions or []):
+        held.add((p.get("symbol") or "").upper())
+    # Find group containing sym
+    for g in _FINAL10_CORR_GROUPS:
+        if sym in g:
+            # if any other symbol in same group already held -> block
+            for h in held:
+                if h in g and h != sym:
+                    return f"CORR_GUARD: {h} already held in group"
+    return None
+
+# Wrap _score_symbol to add regime filter
+if FINAL10_ON:
+    _orig_score_symbol = getattr(Trader, "_score_symbol", None)
+    if _orig_score_symbol:
+        def _score_symbol_final10(self, symbol: str, price: float):
+            # Regime filter only matters for entries (not for managing existing positions)
+            if REGIME_FILTER_ON:
+                slope = _final10_regime_slope_bps(symbol)
+                if slope is not None and slope < REGIME_MIN_SLOPE_BPS:
+                    return {"ok": False, "reason": f"RANGE_REGIME slope={slope:.2f}bps < {REGIME_MIN_SLOPE_BPS:.2f}bps"}
+
+            return _orig_score_symbol(self, symbol, price)
+
+        Trader._score_symbol = _score_symbol_final10
+
+# Wrap _enter to add correlation guard and ensure leverage set cache resets properly
+if FINAL10_ON:
+    _orig_enter = getattr(Trader, "_enter", None)
+    if _orig_enter:
+        def _enter_final10(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float):
+            block = _final10_corr_guard_block(self, symbol)
+            if block:
+                self.state["last_event"] = f"대기: {block}"
+                self.notify_throttled(f"⛔ 진입 차단({symbol}): {block}", 120)
+                return
+            return _orig_enter(self, symbol, side, price, reason, sl, tp)
+        Trader._enter = _enter_final10
+
+# Wrap tick: reconcile early + persist more settings always
+if FINAL10_ON:
+    _orig_tick = getattr(Trader, "tick", None)
+    if _orig_tick:
+        def _tick_final10(self):
+            try:
+                # Reconcile FIRST so bot can manage imported positions immediately.
+                _final10_reconcile_into_internal(self)
+            except Exception:
+                pass
+
+            try:
+                return _orig_tick(self)
+            finally:
+                if not PERSIST_MORE_STATE:
+                    return
+                # Persist runtime settings that users expect to survive restarts
+                try:
+                    atomic_write_json(
+                        data_path("runtime_state.json"),
+                        {
+                            "consec_losses": int(getattr(self, "consec_losses", 0) or 0),
+                            "daily_pnl": float(getattr(self, "daily_pnl", 0.0) or 0.0),
+                            "trading_enabled": bool(getattr(self, "trading_enabled", True)),
+                            "mode": str(getattr(self, "mode", MODE_DEFAULT)),
+                            "allow_long": bool(getattr(self, "allow_long", ALLOW_LONG_DEFAULT)),
+                            "allow_short": bool(getattr(self, "allow_short", ALLOW_SHORT_DEFAULT)),
+                            "auto_symbol": bool(getattr(self, "auto_symbol", AUTO_SYMBOL_DEFAULT)),
+                            "fixed_symbol": str(getattr(self, "fixed_symbol", FIXED_SYMBOL_DEFAULT)),
+                            "auto_discovery": bool(getattr(self, "auto_discovery", AUTO_DISCOVERY_DEFAULT)),
+                            "diversify": bool(getattr(self, "diversify", DIVERSIFY_DEFAULT)),
+                            "max_positions": int(getattr(self, "max_positions", MAX_POSITIONS_DEFAULT) or 1),
+                            "symbols": list(getattr(self, "symbols", SYMBOLS_ENV) or []),
+                            "tune": dict(getattr(self, "tune", {}) or {}),
+                            "ai_growth": bool(getattr(self, "ai_growth", AI_GROWTH_DEFAULT)),
+                            "avoid_low_rsi": bool(self.state.get("avoid_low_rsi", False)),
+                            "ts": int(time.time()),
+                        },
+                    )
+                    # keep daily_pnl.json also (compat)
+                    atomic_write_json(data_path("daily_pnl.json"), {"pnl": float(getattr(self, "daily_pnl", 0.0) or 0.0), "ts": int(time.time())})
+                except Exception:
+                    pass
+
+        Trader.tick = _tick_final10
+
+# Load persisted settings on __init__ without editing original __init__ block (safe monkey patch)
+if FINAL10_ON:
+    _orig_init = getattr(Trader, "__init__", None)
+    if _orig_init:
+        def _init_final10(self, state=None):
+            _orig_init(self, state)
+
+            # Load more settings if available
+            try:
+                persisted = safe_read_json(data_path("runtime_state.json"), {}) or {}
+                if "trading_enabled" in persisted:
+                    self.trading_enabled = bool(persisted.get("trading_enabled"))
+                if "mode" in persisted and str(persisted.get("mode")):
+                    self.mode = str(persisted.get("mode")).upper()
+                if "allow_long" in persisted:
+                    self.allow_long = bool(persisted.get("allow_long"))
+                if "allow_short" in persisted:
+                    self.allow_short = bool(persisted.get("allow_short"))
+                if "auto_symbol" in persisted:
+                    self.auto_symbol = bool(persisted.get("auto_symbol"))
+                if "fixed_symbol" in persisted and str(persisted.get("fixed_symbol")):
+                    self.fixed_symbol = str(persisted.get("fixed_symbol")).upper()
+                if "auto_discovery" in persisted:
+                    self.auto_discovery = bool(persisted.get("auto_discovery"))
+                if "diversify" in persisted:
+                    self.diversify = bool(persisted.get("diversify"))
+                if "max_positions" in persisted:
+                    self.max_positions = int(_clamp(int(persisted.get("max_positions") or 1), 1, 5))
+                if "symbols" in persisted and isinstance(persisted.get("symbols"), list) and persisted.get("symbols"):
+                    self.symbols = list(dict.fromkeys([str(s).upper() for s in persisted["symbols"] if str(s).strip()]))
+                if "tune" in persisted and isinstance(persisted.get("tune"), dict) and persisted.get("tune"):
+                    self.tune = persisted["tune"]
+                if "ai_growth" in persisted:
+                    self.ai_growth = bool(persisted.get("ai_growth"))
+                if "avoid_low_rsi" in persisted:
+                    self.state["avoid_low_rsi"] = bool(persisted.get("avoid_low_rsi"))
+
+                # Restore daily pnl in-memory as well
+                if "daily_pnl" in persisted:
+                    try:
+                        self.daily_pnl = float(persisted.get("daily_pnl") or 0.0)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Immediate reconcile after init
+            try:
+                _final10_reconcile_into_internal(self)
+            except Exception:
+                pass
+
+        Trader.__init__ = _init_final10
+
+# ======================================================================
+# END FINAL 10/10 PATCH
+# ======================================================================
