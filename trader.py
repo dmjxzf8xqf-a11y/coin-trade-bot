@@ -1103,7 +1103,7 @@ class Trader:
         if close_qty <= 0:
             return
 
-side_ex = "Sell" if side == "LONG" else "Buy"
+side_ex = "Sell" if pos["side"] == "LONG" else "Buy"
 if USE_EXECUTION_ENGINE and self._exec is not None:
     self._exec.market(symbol, side_ex, close_qty, reduce_only=True)
 else:
