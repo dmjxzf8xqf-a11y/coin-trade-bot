@@ -711,7 +711,15 @@ def _ai_record_pnl(pnl_est: float):
 class Trader:
     def __init__(self, state=None):
         self.state = state if isinstance(state, dict) else {}
+        # --- option flags ---
+        self.state.setdefault("avoid_low_rsi", False)
 
+        # --- quant core instances ---
+        self._slip = None
+        self._exec = None
+        self._perf = None
+        self._port = None
+        self._wf = None
         self.trading_enabled = True
         self.mode = MODE_DEFAULT
         self.allow_long = ALLOW_LONG_DEFAULT
@@ -768,15 +776,6 @@ class Trader:
         # --- scan ---
         self._last_scan_ts = 0
 
-        # --- option flags ---
-        self.state.setdefault("avoid_low_rsi", False)
-
-# --- quant core instances ---
-self._slip = None
-self._exec = None
-self._perf = None
-self._port = None
-self._wf = None
 try:
     if USE_EXECUTION_ENGINE and ExecutionEngine is not None:
         self._slip = SlippageTracker() if SlippageTracker is not None else None
