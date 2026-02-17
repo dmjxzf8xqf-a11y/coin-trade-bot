@@ -1059,13 +1059,12 @@ class Trader:
 
         self._ensure_leverage(symbol)
 
-
-if not DRY_RUN:
-    side_ex = "Buy" if side == "LONG" else "Sell"
-    if USE_EXECUTION_ENGINE and self._exec is not None:
+        if not DRY_RUN:
+        side_ex = "Buy" if side == "LONG" else "Sell"
+        if USE_EXECUTION_ENGINE and self._exec is not None:
         self._exec.market(symbol, side_ex, qty, reduce_only=False)
-    else:
-        order_market(symbol, side_ex, qty)
+        else:
+         order_market(symbol, side_ex, qty)
 
         tp1_price = None
         if PARTIAL_TP_ON:
