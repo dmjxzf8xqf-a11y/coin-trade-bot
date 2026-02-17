@@ -67,3 +67,28 @@ ENABLE_REGIME_FILTER = True
 # ===== POSITION RISK =====
 RISK_PER_TRADE = 0.02   # 2%
 VOLATILITY_ADJUST = True
+
+
+
+# ===== FINAL QUANT CORE (optional) =====
+USE_EXECUTION_ENGINE = os.getenv("USE_EXECUTION_ENGINE", "1") == "1"
+USE_LIQUIDITY_FILTER = os.getenv("USE_LIQUIDITY_FILTER", "1") == "1"
+USE_STRATEGY_PERF = os.getenv("USE_STRATEGY_PERF", "1") == "1"
+USE_PORTFOLIO_OPT = os.getenv("USE_PORTFOLIO_OPT", "1") == "1"
+USE_WALKFORWARD = os.getenv("USE_WALKFORWARD", "0") == "1"  # 기본 OFF (무거움)
+
+# liquidity filter (Bybit ticker based)
+MIN_TURNOVER24H_USDT = float(os.getenv("MIN_TURNOVER24H_USDT", "5000000"))  # 5M
+MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", "12"))  # 12bps
+
+# strategy performance auto-disable
+PERF_WINDOW = int(os.getenv("PERF_WINDOW", "30"))
+PERF_MIN_TRADES = int(os.getenv("PERF_MIN_TRADES", "10"))
+PERF_DISABLE_BELOW_WINRATE = float(os.getenv("PERF_DISABLE_BELOW_WINRATE", "0.43"))
+PERF_DISABLE_FOR_MIN = int(os.getenv("PERF_DISABLE_FOR_MIN", "60"))
+
+# portfolio optimizer
+PORT_BASE_MULT = float(os.getenv("PORT_BASE_MULT", "1.0"))
+PORT_MAX_MULT = float(os.getenv("PORT_MAX_MULT", "1.8"))
+PORT_MIN_MULT = float(os.getenv("PORT_MIN_MULT", "0.6"))
+PORT_SMOOTH = float(os.getenv("PORT_SMOOTH", "0.35"))
