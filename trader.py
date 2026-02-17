@@ -14,7 +14,6 @@ import hmac
 import hashlib
 import math
 import requests
-from strategy_router import select_strategy
 from urllib.parse import urlencode
 from datetime import datetime, timezone
 from storage_utils import data_dir, data_path, safe_read_json, atomic_write_json
@@ -586,6 +585,72 @@ def compute_signal_and_exits(symbol: str, side: str, price: float, mp: dict, avo
 
     return ok, reason, score, sl, tp, a
 
+
+# =========================
+# Regime + Strategy Router
+# =========================
+def detect_market_regime(symbol: str) -> str:
+    """returns: bull | bear | range | volatile"""
+    try:
+        kl = get_klines(symbol, ENTRY_INTERVAL, max(KLINE_LIMIT, EMA_SLOW * 3 + 60))
+        if not kl or len(kl) < (EMA_SLOW * 3 + 30):
+            return "range"
+
+        kl = list(reversed(kl))
+        closes = [float(x[4]) for x in kl]
+        highs = [float(x[2]) for x in kl]
+        lows  = [float(x[3]) for x in kl]
+
+        price = closes[-1]
+        ef = ema(closes[-EMA_FAST * 3 :], EMA_FAST)
+        es = ema(closes[-EMA_SLOW * 3 :], EMA_SLOW)
+        a = atr(highs, lows, closes, ATR_PERIOD)
+        if a is None:
+            a = price * 0.005
+
+        vol = a / max(price, 1e-9)
+        if vol >= 0.03:
+            return "volatile"
+
+        # Prefer FINAL10's slope function if present
+        slope_bps = None
+        try:
+            slope_bps = _final10_regime_slope_bps(symbol)
+        except Exception:
+            slope_bps = None
+
+        if slope_bps is None:
+            lookback = 20
+            es_now = es
+            es_old = ema(closes[-(EMA_SLOW * 3 + lookback) : -lookback], EMA_SLOW)
+            if es_old > 0:
+                slope_bps = abs((es_now - es_old) / es_old) * 10000.0
+
+        if slope_bps is not None and slope_bps < 6.0:
+            return "range"
+
+        if price >= es and ef >= es:
+            return "bull"
+        if price <= es and ef <= es:
+            return "bear"
+        return "range"
+    except Exception:
+        return "range"
+
+
+def apply_strategy_to_mp(symbol: str, mp: dict):
+    """mp를 시장 국면에 맞게 조정. (진입 단계에서만 사용)"""
+    regime = detect_market_regime(symbol)
+    strategy = select_strategy(regime)
+
+    if strategy == "low_risk":
+        return False, f"STRATEGY_BLOCK: {regime} -> low_risk"
+
+    if strategy == "mean_reversion":
+        mp["enter_score"] = int(mp.get("enter_score", 65)) + 5
+
+    return True, f"STRATEGY_OK: {regime} -> {strategy}"
+
 # =========================
 # PnL estimate
 # =========================
@@ -690,23 +755,32 @@ class Trader:
         # --- option flags ---
         self.state.setdefault("avoid_low_rsi", False)    
     def _get_lot_size(self, symbol):
-        # Bybit 최소 주문수량/스텝 조회
+        """Bybit 최소 주문수량/스텝 조회. 실패 시 안전한 기본값 반환."""
         if symbol in _lot_cache:
             return _lot_cache[symbol]
 
         try:
-            r = self._req(
+            r = http.request(
                 "GET",
                 "/v5/market/instruments-info",
-                params={"category": CATEGORY, "symbol": symbol},
+                {"category": CATEGORY, "symbol": symbol},
+                auth=False,
             )
-            info = r["result"]["list"][0]["lotSizeFilter"]
-            step = float(info["qtyStep"])
-            min_qty = float(info["minOrderQty"])
+            info = (r.get("result") or {}).get("list") or []
+            info = (info[0] or {}).get("lotSizeFilter") if info else None
+            if not info:
+                raise RuntimeError("instruments-info empty")
+            step = float(info.get("qtyStep") or 0.01)
+            min_qty = float(info.get("minOrderQty") or 0.01)
+            if step <= 0:
+                step = 0.01
+            if min_qty <= 0:
+                min_qty = step
             _lot_cache[symbol] = (step, min_qty)
             return step, min_qty
         except Exception:
             return 0.01, 0.01
+
     
         # optional: RSI 회피 플래그(원하면 /status로 확인 가능)
         self.state.setdefault("avoid_low_rsi", False)
@@ -785,6 +859,13 @@ class Trader:
     # ---------------- scanning ----------------
     def _score_symbol(self, symbol: str, price: float):
         mp = self._mp()
+        
+        # ✅ 전략 라우팅(시장 국면 기반)
+        mp = dict(mp)  # 원본 보호
+        ok_strat, strat_msg = apply_strategy_to_mp(symbol, mp)
+        if not ok_strat:
+            return {"ok": False, "reason": strat_msg}
+
         sp = get_spread_pct(symbol)
         if sp is not None and sp > MAX_SPREAD_PCT:
             return {"ok": False, "reason": f"SPREAD({sp:.2f}%)"}
