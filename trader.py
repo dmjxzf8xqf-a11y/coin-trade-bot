@@ -18,6 +18,22 @@ from urllib.parse import urlencode
 from datetime import datetime, timezone
 from storage_utils import data_dir, data_path, safe_read_json, atomic_write_json
 from kill_switch import KillSwitch
+
+# --- FINAL QUANT CORE (optional) ---
+try:
+    from quant_core.execution_engine import ExecutionEngine
+    from quant_core.slippage_tracker import SlippageTracker
+    from quant_core.strategy_performance import StrategyPerformance
+    from quant_core.portfolio_optimizer import PortfolioOptimizer
+    from quant_core.liquidity_filter import is_liquid_ok
+    from quant_core.walkforward import WalkForwardScheduler
+except Exception:
+    ExecutionEngine = None
+    SlippageTracker = None
+    StrategyPerformance = None
+    PortfolioOptimizer = None
+    is_liquid_ok = None
+    WalkForwardScheduler = None
 # ===== LOT SIZE CACHE =====
 _lot_cache = {}
 # --- optional AI learn module ---
@@ -644,12 +660,12 @@ def apply_strategy_to_mp(symbol: str, mp: dict):
     strategy = select_strategy(regime)
 
     if strategy == "low_risk":
-        return False, f"STRATEGY_BLOCK: {regime} -> low_risk"
+        return False, f"STRATEGY_BLOCK: {regime} -> low_risk", strategy
 
     if strategy == "mean_reversion":
         mp["enter_score"] = int(mp.get("enter_score", 65)) + 5
 
-    return True, f"STRATEGY_OK: {regime} -> {strategy}"
+    return True, f"STRATEGY_OK: {regime} -> {strategy}", strategy
 
 # =========================
 # PnL estimate
@@ -753,7 +769,48 @@ class Trader:
         self._last_scan_ts = 0
 
         # --- option flags ---
-        self.state.setdefault("avoid_low_rsi", False)    
+        self.state.setdefault("avoid_low_rsi", False)
+
+# --- quant core instances ---
+self._slip = None
+self._exec = None
+self._perf = None
+self._port = None
+self._wf = None
+try:
+    if USE_EXECUTION_ENGINE and ExecutionEngine is not None:
+        self._slip = SlippageTracker() if SlippageTracker is not None else None
+        self._exec = ExecutionEngine(get_price_fn=get_price, place_market_fn=order_market, tracker=self._slip)
+except Exception:
+    self._exec = None
+
+try:
+    if USE_STRATEGY_PERF and StrategyPerformance is not None:
+        self._perf = StrategyPerformance(
+            window=PERF_WINDOW,
+            min_trades=PERF_MIN_TRADES,
+            disable_below_winrate=PERF_DISABLE_BELOW_WINRATE,
+            disable_for_min=PERF_DISABLE_FOR_MIN,
+        )
+except Exception:
+    self._perf = None
+
+try:
+    if USE_PORTFOLIO_OPT and PortfolioOptimizer is not None:
+        self._port = PortfolioOptimizer(
+            base_mult=PORT_BASE_MULT,
+            max_mult=PORT_MAX_MULT,
+            min_mult=PORT_MIN_MULT,
+            smooth=PORT_SMOOTH,
+        )
+except Exception:
+    self._port = None
+
+try:
+    if USE_WALKFORWARD and WalkForwardScheduler is not None:
+        self._wf = WalkForwardScheduler(interval_hours=float(OPTIMIZE_INTERVAL_HOURS))
+except Exception:
+    self._wf = None    
     def _get_lot_size(self, symbol):
         """Bybit 최소 주문수량/스텝 조회. 실패 시 안전한 기본값 반환."""
         if symbol in _lot_cache:
@@ -862,13 +919,26 @@ class Trader:
         
         # ✅ 전략 라우팅(시장 국면 기반)
         mp = dict(mp)  # 원본 보호
-        ok_strat, strat_msg = apply_strategy_to_mp(symbol, mp)
+        ok_strat, strat_msg, strat_key = apply_strategy_to_mp(symbol, mp)
         if not ok_strat:
-            return {"ok": False, "reason": strat_msg}
+            return {"ok": False, "reason": strat_msg, "strategy": strat_key}
 
         sp = get_spread_pct(symbol)
         if sp is not None and sp > MAX_SPREAD_PCT:
             return {"ok": False, "reason": f"SPREAD({sp:.2f}%)"}
+
+        # --- liquidity filter (ticker based) ---
+        if USE_LIQUIDITY_FILTER and (is_liquid_ok is not None):
+            try:
+                t = get_ticker(symbol) or {}
+                bid = float(t.get("bid1Price") or 0)
+                ask = float(t.get("ask1Price") or 0)
+                turnover = float(t.get("turnover24h") or 0)
+                okliq, msgliq = is_liquid_ok(bid, ask, turnover, MIN_TURNOVER24H_USDT, MAX_SPREAD_BPS)
+                if not okliq:
+                    return {"ok": False, "reason": msgliq, "strategy": strat_key}
+            except Exception:
+                pass
 
         avoid_low_rsi = bool(self.state.get("avoid_low_rsi", False))
 
@@ -887,8 +957,8 @@ class Trader:
             okS, reasonS, scoreS, slS, tpS, aS = False, "SHORT DISABLED", -999, None, None, None
 
         if scoreS > scoreL:
-            return {"ok": okS, "side": "SHORT", "score": scoreS, "reason": reasonS, "sl": slS, "tp": tpS, "atr": aS}
-        return {"ok": okL, "side": "LONG", "score": scoreL, "reason": reasonL, "sl": slL, "tp": tpL, "atr": aL}
+            return {"ok": okS, "side": "SHORT", "score": scoreS, "reason": reasonS, "sl": slS, "tp": tpS, "atr": aS, "strategy": strat_key}
+        return {"ok": okL, "side": "LONG", "score": scoreL, "reason": reasonL, "sl": slL, "tp": tpL, "atr": aL, "strategy": strat_key}
 
     def pick_best(self):
         if time.time() - self._last_scan_ts < SCAN_INTERVAL_SEC:
@@ -944,10 +1014,18 @@ class Trader:
             self.state["sync_error"] = str(e)
 
     # ---------------- enter/exit helpers ----------------
-    def _enter(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float):
+    def _enter(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float, strategy: str = "", score: float = 0.0):
         mp = self._mp()
         lev = float(mp["lev"])
         order_usdt = float(mp["order_usdt"])
+
+        # --- portfolio optimizer: order_usdt multiplier ---
+        try:
+            if USE_PORTFOLIO_OPT and self._port is not None:
+                mult = float(self._port.recommend_multiplier(symbol, score=float(score or 0.0), winrate_pct=None))
+                order_usdt = float(order_usdt) * max(0.1, mult)
+        except Exception:
+            pass
 
         # qty 계산: 기본은 USDT*lev / price
         qty = (order_usdt * lev) / float(price)
@@ -985,8 +1063,13 @@ class Trader:
 
         self._ensure_leverage(symbol)
 
-        if not DRY_RUN:
-            order_market(symbol, "Buy" if side == "LONG" else "Sell", qty)
+
+if not DRY_RUN:
+    side_ex = "Buy" if side == "LONG" else "Sell"
+    if USE_EXECUTION_ENGINE and self._exec is not None:
+        self._exec.market(symbol, side_ex, qty, reduce_only=False)
+    else:
+        order_market(symbol, side_ex, qty)
 
         tp1_price = None
         if PARTIAL_TP_ON:
@@ -1007,6 +1090,9 @@ class Trader:
             "tp1_done": False,
             "last_order_usdt": order_usdt,
             "last_lev": lev,
+
+"strategy": strategy,
+"entry_score": float(score or 0.0),
         }
         self.positions.append(pos)
 
@@ -1021,7 +1107,12 @@ class Trader:
             return
         if close_qty <= 0:
             return
-        order_market(symbol, "Sell" if side == "LONG" else "Buy", close_qty, reduce_only=True)
+
+side_ex = "Sell" if side == "LONG" else "Buy"
+if USE_EXECUTION_ENGINE and self._exec is not None:
+    self._exec.market(symbol, side_ex, close_qty, reduce_only=True)
+else:
+    order_market(symbol, side_ex, close_qty, reduce_only=True)
 
     def _exit_position(self, idx: int, why: str, force=False):
         if idx < 0 or idx >= len(self.positions):
@@ -1051,6 +1142,13 @@ class Trader:
         pnl_est = estimate_pnl_usdt(side, entry_price, price, notional)
         self.day_profit += pnl_est
         _ai_record_pnl(pnl_est)
+
+        # --- strategy performance learning ---
+        try:
+            if USE_STRATEGY_PERF and self._perf is not None:
+                self._perf.record_trade(str(pos.get("strategy") or ""), float(pnl_est))
+        except Exception:
+            pass
         self._trade_count_total += 1
         self._recent_results.append(pnl_est)
         if len(self._recent_results) > 30:
@@ -1528,7 +1626,17 @@ class Trader:
                     self.state["last_event"] = f"대기: score={info.get('score')}"
                     return
 
-                self._enter(symbol, info["side"], price, info["reason"], info["sl"], info["tp"])
+                # --- strategy perf gate ---
+                try:
+                    if USE_STRATEGY_PERF and self._perf is not None:
+                        okp, msgp = self._perf.allow(str(info.get("strategy") or ""))
+                        if not okp:
+                            self.state["last_event"] = f"대기: {msgp}"
+                            return
+                except Exception:
+                    pass
+
+                self._enter(symbol, info["side"], price, info["reason"], info["sl"], info["tp"], str(info.get("strategy") or ""), float(info.get("score") or 0.0))
                 self.state["last_event"] = f"ENTER {symbol} {info['side']}"
             except Exception as e:
                 self.err_throttled(f"❌ entry 실패(fixed): {e}")
@@ -1541,8 +1649,17 @@ class Trader:
             return
 
         try:
-            self._enter(pick["symbol"], pick["side"], pick["price"], pick["reason"], pick["sl"], pick["tp"])
-            self.state["last_event"] = f"ENTER {pick['symbol']} {pick['side']}"
+            # --- strategy perf gate ---
+            try:
+                if USE_STRATEGY_PERF and self._perf is not None:
+                    okp, msgp = self._perf.allow(str(pick.get("strategy") or ""))
+                    if not okp:
+                        self.state["last_event"] = f"대기: {msgp}"
+                        return
+            except Exception:
+                pass
+
+            self._enter(pick["symbol"], pick["side"], pick["price"], pick["reason"], pick["sl"], pick["tp"], str(pick.get("strategy") or ""), float(pick.get("score") or 0.0))
         except Exception as e:
             self.err_throttled(f"❌ entry 실패(scan): {e}")
 
