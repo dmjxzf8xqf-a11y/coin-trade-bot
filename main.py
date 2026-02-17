@@ -33,7 +33,19 @@ def health():
     return jsonify({**state, **(trader.public_state() if hasattr(trader, "public_state") else {})})
 
 
-# ✅ 텔레그램 업데이트 가져오기
+@app.get("/metrics")
+def metrics():
+    # lightweight operational snapshot
+    base = {**state, **(trader.public_state() if hasattr(trader, "public_state") else {})}
+    return jsonify(base)
+
+@app.get("/equity")
+def equity():
+    # If your bot stores equity/trade logs elsewhere, expose them here. Safe default: just state.
+    return jsonify({"ok": True, "note": "equity series not wired in this build", "state": state})
+
+
+# â íë ê·¸ë¨ ìë°ì´í¸ ê°ì ¸ì¤ê¸°
 def _tg_get_updates(offset=None, timeout=25):
     if not TELEGRAM_API:
         return {"ok": False, "result": []}
@@ -44,9 +56,9 @@ def _tg_get_updates(offset=None, timeout=25):
     return r.json()
 
 
-# ✅ 텔레그램 폴링 루프
+# â íë ê·¸ë¨ í´ë§ ë£¨í
 def telegram_loop():
-    print("✅ Telegram polling started")
+    print("â Telegram polling started")
     offset = None
 
     while True:
@@ -67,29 +79,29 @@ def telegram_loop():
                 if not text:
                     continue
 
-                print(f"📩 {chat_id}: {text}")
+                print(f"ð© {chat_id}: {text}")
                 state["last_telegram"] = text
 
-                # CHAT_ID 제한 사용 시
+                # CHAT_ID ì í ì¬ì© ì
                 if CHAT_ID and chat_id != CHAT_ID:
-                    print("⛔ 다른 채팅 무시")
+                    print("â ë¤ë¥¸ ì±í ë¬´ì")
                     continue
 
                 try:
                     trader.handle_command(text)
                 except Exception as e:
-                    print("❌ handle_command error:", e)
+                    print("â handle_command error:", e)
 
         except Exception as e:
-            print("❌ telegram_loop error:", e)
+            print("â telegram_loop error:", e)
 
         time.sleep(1)
 
 
-# ✅ 트레이딩 루프
+# â í¸ë ì´ë© ë£¨í
 def loop():
     state["running"] = True
-    trader.notify("🤖 봇 시작됨")
+    trader.notify("ð¤ ë´ ììë¨")
 
     while True:
         try:
@@ -98,16 +110,16 @@ def loop():
             state["last_error"] = None
         except Exception as e:
             state["last_error"] = str(e)
-            trader.notify(f"❌ 루프 에러: {e}")
+            trader.notify(f"â ë£¨í ìë¬: {e}")
 
         time.sleep(int(os.getenv("LOOP_SECONDS", "20")))
 
 
 if __name__ == "__main__":
-    # ✅ 텔레그램 루프
+    # â íë ê·¸ë¨ ë£¨í
     threading.Thread(target=telegram_loop, daemon=True).start()
 
-    # ✅ 트레이딩 루프
+    # â í¸ë ì´ë© ë£¨í
     threading.Thread(target=loop, daemon=True).start()
 
     port = int(os.getenv("PORT", "8080"))
