@@ -25,6 +25,8 @@ try:
     from quant_core.slippage_tracker import SlippageTracker
     from quant_core.strategy_performance import StrategyPerformance
     from quant_core.portfolio_optimizer import PortfolioOptimizer
+    from quant_core.portfolio_engine import PortfolioEngine
+    from quant_core.institutional_risk_model import InstitutionalRiskModel
     from quant_core.liquidity_filter import is_liquid_ok
     from quant_core.walkforward import WalkForwardScheduler
 except Exception:
@@ -32,6 +34,8 @@ except Exception:
     SlippageTracker = None
     StrategyPerformance = None
     PortfolioOptimizer = None
+    PortfolioEngine = None
+    InstitutionalRiskModel = None
     is_liquid_ok = None
     WalkForwardScheduler = None
 # ===== LOT SIZE CACHE =====
@@ -53,6 +57,27 @@ try:
 except Exception:
     pass
 
+
+# =========================
+# OPTIONAL FEATURE FLAGS (safe defaults if not in config.py)
+# =========================
+def _bool_env(name: str, default: str = "false") -> bool:
+    return str(os.getenv(name, default)).lower() in ("1","true","yes","y","on")
+
+# quant_core feature toggles
+USE_EXECUTION_ENGINE = globals().get("USE_EXECUTION_ENGINE", _bool_env("USE_EXECUTION_ENGINE", "true"))
+USE_STRATEGY_PERF   = globals().get("USE_STRATEGY_PERF", _bool_env("USE_STRATEGY_PERF", "true"))
+USE_PORTFOLIO_OPT   = globals().get("USE_PORTFOLIO_OPT", _bool_env("USE_PORTFOLIO_OPT", "true"))
+USE_WALKFORWARD     = globals().get("USE_WALKFORWARD", _bool_env("USE_WALKFORWARD", "false"))
+USE_LIQUIDITY_FILTER= globals().get("USE_LIQUIDITY_FILTER", _bool_env("USE_LIQUIDITY_FILTER", "true"))
+
+# Institutional layer (new)
+USE_INST_PORTFOLIO  = globals().get("USE_INST_PORTFOLIO", _bool_env("USE_INST_PORTFOLIO", "true"))
+USE_INST_RISK_MODEL = globals().get("USE_INST_RISK_MODEL", _bool_env("USE_INST_RISK_MODEL", "true"))
+
+# Inst portfolio params
+INST_MAX_SYMBOLS = int(os.getenv("INST_MAX_SYMBOLS", str(globals().get("INST_MAX_SYMBOLS", 3))))
+INST_MAX_WEIGHT  = float(os.getenv("INST_MAX_WEIGHT", str(globals().get("INST_MAX_WEIGHT", 0.35))))
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 # ===== Proxy 설정 =====
@@ -804,6 +829,31 @@ class Trader:
                 )
         except Exception:
             self._port = None
+
+        # --- Institutional portfolio/risk (lightweight) ---
+        try:
+            if USE_INST_RISK_MODEL and (InstitutionalRiskModel is not None):
+                self._inst_risk = InstitutionalRiskModel(max_symbol_weight=float(INST_MAX_WEIGHT))
+            else:
+                self._inst_risk = None
+        except Exception:
+            self._inst_risk = None
+
+        try:
+            if USE_INST_PORTFOLIO and (PortfolioEngine is not None):
+                self._inst_port = PortfolioEngine(risk=self._inst_risk, max_symbols=int(INST_MAX_SYMBOLS))
+                self._inst_weights = {}
+                self._inst_last_recalc = 0.0
+            else:
+                self._inst_port = None
+                self._inst_weights = {}
+                self._inst_last_recalc = 0.0
+        except Exception:
+            self._inst_port = None
+            self._inst_weights = {}
+            self._inst_last_recalc = 0.0
+
+
         
         try:
             if USE_WALKFORWARD and WalkForwardScheduler is not None:
@@ -910,6 +960,42 @@ class Trader:
             self.state["discovery_error"] = str(e)
 
     # ---------------- scanning ----------------
+
+    def _recalc_inst_weights(self):
+        """Recalculate portfolio weights periodically (cheap, safe).
+        Uses recent close prices from Bybit klines.
+        """
+        if not self._inst_port:
+            return
+        # every N seconds
+        interval = int(os.getenv("INST_RECALC_SEC", "120"))
+        if time.time() - float(getattr(self, "_inst_last_recalc", 0.0) or 0.0) < interval:
+            return
+        self._inst_last_recalc = time.time()
+        closes_map = {}
+        # universe: current symbols list (cap for safety)
+        universe = list(dict.fromkeys([s.upper() for s in (self.symbols or []) if isinstance(s, str)]))
+        cap = int(os.getenv("INST_UNIVERSE_CAP", "15"))
+        universe = universe[:cap]
+        for sym in universe:
+            try:
+                kl = get_klines(sym, ENTRY_INTERVAL, int(os.getenv("INST_LOOKBACK", "180")))
+                if not kl:
+                    continue
+                kl = list(reversed(kl))
+                closes = [float(x[4]) for x in kl if float(x[4] or 0) > 0]
+                if len(closes) >= 20:
+                    closes_map[sym] = closes
+            except Exception:
+                continue
+        if not closes_map:
+            return
+        try:
+            self._inst_weights = self._inst_port.allocate(closes_map, winrate_map=None)
+            self.state["inst_weights"] = dict(list(self._inst_weights.items())[:8])
+        except Exception as e:
+            self.state["inst_weights_error"] = str(e)
+
     def _score_symbol(self, symbol: str, price: float):
         mp = self._mp()
         
@@ -935,6 +1021,18 @@ class Trader:
                     return {"ok": False, "reason": msgliq, "strategy": strat_key}
             except Exception:
                 pass
+
+        # --- institutional risk snapshot (VaR/ES/vol) ---
+        try:
+            if USE_INST_RISK_MODEL and self._inst_risk is not None:
+                kl = get_klines(symbol, ENTRY_INTERVAL, int(os.getenv("INST_RISK_LOOKBACK", "180")))
+                if kl:
+                    kl = list(reversed(kl))
+                    closes = [float(x[4]) for x in kl if float(x[4] or 0) > 0]
+                    snap = self._inst_risk.summarize_symbol(closes)
+                    self.state["risk"] = {"symbol": symbol, **snap}
+        except Exception:
+            pass
 
         avoid_low_rsi = bool(self.state.get("avoid_low_rsi", False))
 
@@ -1020,6 +1118,16 @@ class Trader:
             if USE_PORTFOLIO_OPT and self._port is not None:
                 mult = float(self._port.recommend_multiplier(symbol, score=float(score or 0.0), winrate_pct=None))
                 order_usdt = float(order_usdt) * max(0.1, mult)
+        except Exception:
+            pass
+
+
+        # --- institutional portfolio engine: weight-based multiplier ---
+        try:
+            if USE_INST_PORTFOLIO and self._inst_port is not None and isinstance(getattr(self, "_inst_weights", None), dict):
+                mult2 = float(self._inst_port.multiplier_for_symbol(self._inst_weights, symbol))
+                order_usdt = float(order_usdt) * max(0.1, mult2)
+                self.state["inst_mult"] = {"symbol": symbol, "mult": mult2}
         except Exception:
             pass
 
@@ -1560,6 +1668,12 @@ class Trader:
         # discovery + exchange sync
         self._refresh_discovery()
         self._sync_real_positions()
+        # institutional portfolio weights (periodic)
+        try:
+            self._recalc_inst_weights()
+        except Exception:
+            pass
+
 
         # milestone notify (optional)
         try:
