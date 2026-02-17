@@ -776,40 +776,40 @@ class Trader:
         # --- scan ---
         self._last_scan_ts = 0
 
-try:
-    if USE_EXECUTION_ENGINE and ExecutionEngine is not None:
-        self._slip = SlippageTracker() if SlippageTracker is not None else None
-        self._exec = ExecutionEngine(get_price_fn=get_price, place_market_fn=order_market, tracker=self._slip)
-except Exception:
-    self._exec = None
-
-try:
-    if USE_STRATEGY_PERF and StrategyPerformance is not None:
-        self._perf = StrategyPerformance(
-            window=PERF_WINDOW,
-            min_trades=PERF_MIN_TRADES,
-            disable_below_winrate=PERF_DISABLE_BELOW_WINRATE,
-            disable_for_min=PERF_DISABLE_FOR_MIN,
-        )
-except Exception:
-    self._perf = None
-
-try:
-    if USE_PORTFOLIO_OPT and PortfolioOptimizer is not None:
-        self._port = PortfolioOptimizer(
-            base_mult=PORT_BASE_MULT,
-            max_mult=PORT_MAX_MULT,
-            min_mult=PORT_MIN_MULT,
-            smooth=PORT_SMOOTH,
-        )
-except Exception:
-    self._port = None
-
-try:
-    if USE_WALKFORWARD and WalkForwardScheduler is not None:
-        self._wf = WalkForwardScheduler(interval_hours=float(OPTIMIZE_INTERVAL_HOURS))
-except Exception:
-    self._wf = None    
+        try:
+            if USE_EXECUTION_ENGINE and ExecutionEngine is not None:
+                self._slip = SlippageTracker() if SlippageTracker is not None else None
+                self._exec = ExecutionEngine(get_price_fn=get_price, place_market_fn=order_market, tracker=self._slip)
+        except Exception:
+            self._exec = None
+        
+        try:
+            if USE_STRATEGY_PERF and StrategyPerformance is not None:
+                self._perf = StrategyPerformance(
+                    window=PERF_WINDOW,
+                    min_trades=PERF_MIN_TRADES,
+                    disable_below_winrate=PERF_DISABLE_BELOW_WINRATE,
+                    disable_for_min=PERF_DISABLE_FOR_MIN,
+                )
+        except Exception:
+            self._perf = None
+        
+        try:
+            if USE_PORTFOLIO_OPT and PortfolioOptimizer is not None:
+                self._port = PortfolioOptimizer(
+                    base_mult=PORT_BASE_MULT,
+                    max_mult=PORT_MAX_MULT,
+                    min_mult=PORT_MIN_MULT,
+                    smooth=PORT_SMOOTH,
+                )
+        except Exception:
+            self._port = None
+        
+        try:
+            if USE_WALKFORWARD and WalkForwardScheduler is not None:
+                self._wf = WalkForwardScheduler(interval_hours=float(OPTIMIZE_INTERVAL_HOURS))
+        except Exception:
+            self._wf = None
     def _get_lot_size(self, symbol):
         """Bybit 최소 주문수량/스텝 조회. 실패 시 안전한 기본값 반환."""
         if symbol in _lot_cache:
@@ -837,9 +837,6 @@ except Exception:
         except Exception:
             return 0.01, 0.01
 
-    
-        # optional: RSI 회피 플래그(원하면 /status로 확인 가능)
-        self.state.setdefault("avoid_low_rsi", False)
 
     # ---------------- internal utils ----------------
     def notify(self, msg):
