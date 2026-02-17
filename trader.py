@@ -1103,11 +1103,11 @@ class Trader:
         if close_qty <= 0:
             return
 
-side_ex = "Sell" if pos["side"] == "LONG" else "Buy"
-if USE_EXECUTION_ENGINE and self._exec is not None:
-    self._exec.market(symbol, side_ex, close_qty, reduce_only=True)
-else:
-    order_market(symbol, side_ex, close_qty, reduce_only=True)
+        side_ex = "Sell" if side == "LONG" else "Buy"
+        if USE_EXECUTION_ENGINE and self._exec is not None:
+            self._exec.market(symbol, side_ex, close_qty, reduce_only=True)
+        else:
+            order_market(symbol, side_ex, close_qty, reduce_only=True)
 
     def _exit_position(self, idx: int, why: str, force=False):
         if idx < 0 or idx >= len(self.positions):
