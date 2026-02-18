@@ -1808,13 +1808,13 @@ class Trader:
             self.notify("🚨 PANIC: 청산 시도 + 거래 OFF")
             return
 
-       if c0 == "/ui":
-           v = (arg or "").lower()
-           on = v in ("on", "1", "true", "yes", "y")
+        if c0 == "/ui":
+            v = (arg or "").lower()
+            on = v in ("on", "1", "true", "yes", "y")
 
-           self.state["tg_buttons_on"] = on
-           self.notify(f"🧩 UI {'ON' if on else 'OFF'}")
-           return
+            self.state["tg_buttons_on"] = on
+            self.notify(f"🧩 UI {'ON' if on else 'OFF'}")
+            return
 
         if c0.startswith("/"):
             self.notify("❓ 모르는 명령. /help")
