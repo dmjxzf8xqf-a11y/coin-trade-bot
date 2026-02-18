@@ -1809,15 +1809,15 @@ class Trader:
             return
 
         if c0 == "/ui":
-    v = (arg or "").lower()
-    on = (v in ("on", "1", "true", "yes", "y"))
-    try:
-        globals()["TG_BUTTONS_ON"] = on
-    except Exception:
-        pass
-    self.state["tg_buttons_on"] = on
-    self.notify(f"🧩 TG_BUTTONS_ON = {'ON' if on else 'OFF'}")
-    return
+            v = (arg or "").lower()
+            on = (v in ("on", "1", "true", "yes", "y"))
+            try:
+                globals()["TG_BUTTONS_ON"] = on
+            except Exception:
+                pass
+            self.state["tg_buttons_on"] = on
+            self.notify(f"🧩 TG_BUTTONS_ON = {'ON' if on else 'OFF'}")
+            return
 
         if c0.startswith("/ui"):
             v = (arg or "").lower()
