@@ -1815,7 +1815,7 @@ class Trader:
                 self.notify(self.help_text())
             return
 
-        if c0 == "/ui":
+        if c0.startswith("/ui"):
             # 사용법: /ui on|off  (텔레그램 버튼 UI 사용 여부)
             v = (arg or "").lower()
             on = (v in ("on", "1", "true", "yes", "y"))
