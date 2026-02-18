@@ -83,8 +83,8 @@ def load_state():
                 "losses": int(row.get("losses") or 0),
                 "enter_score": int(row.get("enter_score") or 60),
             }
-        except Exception:
-            pass
+        except Exception as e:
+    print("❌ Supabase load error:", e)
 
     # fallback
     return _load_json(LEARN_FILE, {"wins": 0, "losses": 0, "enter_score": 60})
@@ -101,8 +101,8 @@ def save_state(state):
             }
             _sb_patch_global(patch)
             return
-        except Exception:
-            pass
+        except Exception as e:
+    print("❌ Supabase load error:", e)
 
     _save_json(LEARN_FILE, state)
 
