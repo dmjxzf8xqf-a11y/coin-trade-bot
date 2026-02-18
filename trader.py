@@ -19,6 +19,18 @@ from datetime import datetime, timezone
 from storage_utils import data_dir, data_path, safe_read_json, atomic_write_json
 from kill_switch import KillSwitch
 
+# --- optional advanced modules ---
+try:
+    from volatility_position import adjust_position_size
+except Exception:
+    def adjust_position_size(base_usdt, atr_pct):
+        return base_usdt
+
+try:
+    from strategy_guard import StrategyGuard
+except Exception:
+    StrategyGuard = None
+
 # --- FINAL QUANT CORE (optional) ---
 try:
     from quant_core.execution_engine import ExecutionEngine
@@ -58,6 +70,20 @@ except Exception:
     pass
 
 
+# --- optional strategy router (if exists) ---
+try:
+    from strategy_router import select_strategy  # type: ignore
+except Exception:
+    def select_strategy(regime: str) -> str:
+        r = (regime or '').lower()
+        # conservative defaults
+        if r in ('volatile', 'crash', 'panic'):
+            return 'low_risk'
+        if r in ('range', 'sideways'):
+            return 'mean_reversion'
+        return 'trend'
+
+
 # =========================
 # OPTIONAL FEATURE FLAGS (safe defaults if not in config.py)
 # =========================
@@ -69,6 +95,11 @@ USE_EXECUTION_ENGINE = globals().get("USE_EXECUTION_ENGINE", _bool_env("USE_EXEC
 USE_STRATEGY_PERF   = globals().get("USE_STRATEGY_PERF", _bool_env("USE_STRATEGY_PERF", "true"))
 USE_PORTFOLIO_OPT   = globals().get("USE_PORTFOLIO_OPT", _bool_env("USE_PORTFOLIO_OPT", "true"))
 USE_WALKFORWARD     = globals().get("USE_WALKFORWARD", _bool_env("USE_WALKFORWARD", "false"))
+USE_MTF_FILTER      = globals().get("USE_MTF_FILTER", _bool_env("USE_MTF_FILTER", "true"))
+USE_VOL_POSITION    = globals().get("USE_VOL_POSITION", _bool_env("USE_VOL_POSITION", "true"))
+ENABLE_LIVE_OPTIMIZER= globals().get("ENABLE_LIVE_OPTIMIZER", _bool_env("ENABLE_LIVE_OPTIMIZER", "false"))
+MTF_TREND_INTERVAL   = str(os.getenv("MTF_TREND_INTERVAL", globals().get("MTF_TREND_INTERVAL", "60")))
+
 USE_LIQUIDITY_FILTER= globals().get("USE_LIQUIDITY_FILTER", _bool_env("USE_LIQUIDITY_FILTER", "true"))
 
 # Institutional layer (new)
@@ -78,6 +109,35 @@ USE_INST_RISK_MODEL = globals().get("USE_INST_RISK_MODEL", _bool_env("USE_INST_R
 # Inst portfolio params
 INST_MAX_SYMBOLS = int(os.getenv("INST_MAX_SYMBOLS", str(globals().get("INST_MAX_SYMBOLS", 3))))
 INST_MAX_WEIGHT  = float(os.getenv("INST_MAX_WEIGHT", str(globals().get("INST_MAX_WEIGHT", 0.35))))
+
+# =========================
+# ENDGAME (Top Priority) feature flags
+# =========================
+USE_MTF_FILTER      = globals().get("USE_MTF_FILTER", _bool_env("USE_MTF_FILTER", "false"))
+MTF_TREND_INTERVAL  = int(os.getenv("MTF_TREND_INTERVAL", str(globals().get("MTF_TREND_INTERVAL", 60))))  # minutes
+
+USE_VOL_POSITION    = globals().get("USE_VOL_POSITION", _bool_env("USE_VOL_POSITION", "false"))
+VOL_TARGET          = float(os.getenv("VOL_TARGET", "0.012"))        # target ATR/price (1.2%)
+VOL_MIN_SCALE       = float(os.getenv("VOL_MIN_SCALE", "0.5"))
+VOL_MAX_SCALE       = float(os.getenv("VOL_MAX_SCALE", "1.8"))
+
+USE_REALIZED_PNL    = globals().get("USE_REALIZED_PNL", _bool_env("USE_REALIZED_PNL", "true"))
+REALIZED_PNL_LOOKBACK_MIN = int(os.getenv("REALIZED_PNL_LOOKBACK_MIN", "720"))  # how far back to query closed pnl
+
+# Hedge/one-way position mode support (Bybit linear)
+POSITION_MODE = (os.getenv("POSITION_MODE", "ONEWAY") or "ONEWAY").upper()  # ONEWAY|HEDGE
+# Circuit breaker (API instability protection)
+CB_ON = _bool_env("CB_ON", "true")
+CB_ERR_MAX = int(os.getenv("CB_ERR_MAX", "6"))          # errors within window -> disable trading temporarily
+CB_WINDOW_SEC = int(os.getenv("CB_WINDOW_SEC", "180"))  # rolling window seconds
+CB_COOLDOWN_SEC = int(os.getenv("CB_COOLDOWN_SEC", "600"))
+
+# Telegram buttons UI
+TG_BUTTONS_ON = _bool_env("TG_BUTTONS_ON", "false")
+
+# Structured JSONL logging
+LOG_EVENTS = _bool_env("LOG_EVENTS", "true")
+LOG_FILE = data_path("events.jsonl")
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 # ===== Proxy 설정 =====
@@ -423,6 +483,53 @@ def confidence_label(score):
         return "⚠️ 보통"
     return "❌ 낮음"
 
+
+# =========================
+# Multi-timeframe trend filter (HTF)
+# =========================
+def _mtf_trend(symbol: str):
+    """Return 'UP'|'DOWN'|'RANGE'|None using HTF EMA trend."""
+    try:
+        interval = int(MTF_TREND_INTERVAL)
+        if interval <= 0:
+            return None
+        kl = get_klines(symbol, str(interval), max(120, EMA_SLOW * 3))
+        if not kl or len(kl) < max(60, EMA_SLOW * 2):
+            return None
+        kl = list(reversed(kl))
+        closes = [float(x[4]) for x in kl]
+        ef = ema(closes[-EMA_FAST * 3 :], EMA_FAST)
+        es = ema(closes[-EMA_SLOW * 3 :], EMA_SLOW)
+        price = closes[-1]
+        # simple classification
+        if price >= es and ef >= es:
+            return "UP"
+        if price <= es and ef <= es:
+            return "DOWN"
+        return "RANGE"
+    except Exception:
+        return None
+
+def _vol_scale_from_atr(price: float, atr_val: float):
+    """Return scaling multiplier for order_usdt based on ATR/price."""
+    try:
+        if price <= 0 or atr_val is None or atr_val <= 0:
+            return 1.0
+        vol = float(atr_val) / float(price)
+        if vol <= 0:
+            return 1.0
+        target = float(VOL_TARGET)
+        scale = target / vol
+        return float(_clamp(scale, float(VOL_MIN_SCALE), float(VOL_MAX_SCALE)))
+    except Exception:
+        return 1.0
+
+def _position_idx_for(side: str):
+    if POSITION_MODE != "HEDGE":
+        return None
+    s = (side or "").lower()
+    # Bybit linear hedge: 1=Buy side, 2=Sell side
+    return 1 if s in ("buy", "long") else 2
 # =========================
 # Market (per-symbol)
 # =========================
@@ -512,6 +619,9 @@ def order_market(symbol: str, side: str, qty: float, reduce_only=False):
         "qty": str(qty),
         "timeInForce": "IOC",
     }
+    _pidx = _position_idx_for(side)
+    if _pidx is not None:
+        body["positionIdx"] = _pidx
     if reduce_only:
         body["reduceOnly"] = True
     resp = http.request("POST", "/v5/order/create", body, auth=True)
@@ -637,6 +747,7 @@ def detect_market_regime(symbol: str) -> str:
         if not kl or len(kl) < (EMA_SLOW * 3 + 30):
             return "range"
 
+
         kl = list(reversed(kl))
         closes = [float(x[4]) for x in kl]
         highs = [float(x[2]) for x in kl]
@@ -679,6 +790,30 @@ def detect_market_regime(symbol: str) -> str:
         return "range"
 
 
+def _mtf_trend(symbol: str) -> str:
+    """Higher-timeframe trend filter.
+    returns: up | down | range
+    Interval is controlled by MTF_TREND_INTERVAL (default: 60).
+    """
+    try:
+        kl = get_klines(symbol, str(MTF_TREND_INTERVAL), max(300, EMA_SLOW * 3 + 50))
+        if not kl or len(kl) < max(220, EMA_SLOW * 2):
+            return "range"
+        kl = list(reversed(kl))
+        closes = [float(x[4]) for x in kl]
+        ef = ema(closes[-EMA_FAST * 3 :], EMA_FAST)
+        es = ema(closes[-EMA_SLOW * 3 :], EMA_SLOW)
+        price = closes[-1]
+        # conservative: require price+fast align with slow
+        if price >= es and ef >= es:
+            return "up"
+        if price <= es and ef <= es:
+            return "down"
+        return "range"
+    except Exception:
+        return "range"
+
+
 def apply_strategy_to_mp(symbol: str, mp: dict):
     """mp를 시장 국면에 맞게 조정. (진입 단계에서만 사용)"""
     regime = detect_market_regime(symbol)
@@ -695,6 +830,67 @@ def apply_strategy_to_mp(symbol: str, mp: dict):
 # =========================
 # PnL estimate
 # =========================
+
+def _get_realized_pnl_usdt(symbol: str, entry_ts: float):
+    """Fetch realized (closed) PnL from Bybit closed-pnl endpoint.
+    Returns pnl (float) or None. Uses a conservative lookback to reduce API load.
+    """
+    if DRY_RUN or (not USE_REALIZED_PNL):
+        return None
+    try:
+        end_ms = int(time.time() * 1000)
+        lookback_ms = int(max(60, REALIZED_PNL_LOOKBACK_MIN) * 60 * 1000)
+        start_ms = max(0, end_ms - lookback_ms)
+        # Only query if entry was within lookback, else clamp
+        if entry_ts and entry_ts > 0:
+            start_ms = max(start_ms, int(entry_ts * 1000) - 5 * 60 * 1000)
+
+        params = {
+            "category": CATEGORY,
+            "symbol": symbol,
+            "limit": "50",
+            "startTime": str(start_ms),
+            "endTime": str(end_ms),
+        }
+        j = http.request("GET", "/v5/position/closed-pnl", params, auth=True)
+        lst = (j.get("result") or {}).get("list") or []
+        if not lst:
+            return None
+
+        # Choose the most recent record whose updatedTime/createdTime/closeTime is after entry_ts
+        best = None
+        entry_ms = int(entry_ts * 1000) if entry_ts else 0
+        for r in lst:
+            # time fields vary; try a few
+            t_ms = 0
+            for k in ("updatedTime", "createdTime", "closeTime", "execTime"):
+                v = r.get(k)
+                if v is None:
+                    continue
+                try:
+                    t_ms = int(float(v))
+                    if t_ms > 10_000_000_000:  # already ms
+                        pass
+                    else:
+                        t_ms = int(float(v) * 1000)
+                    break
+                except Exception:
+                    continue
+            if entry_ms and t_ms and t_ms < entry_ms:
+                continue
+            best = r
+            break
+
+        if not best:
+            best = lst[0]
+        pnl = best.get("closedPnl")
+        if pnl is None:
+            pnl = best.get("pnl")
+        if pnl is None:
+            return None
+        return float(pnl)
+    except Exception:
+        return None
 def _est_round_trip_cost_frac():
     slip = (SLIPPAGE_BPS / 10000.0)
     return (2 * FEE_RATE) + (2 * slip)
@@ -712,13 +908,47 @@ def estimate_pnl_usdt(side: str, entry_price: float, exit_price: float, notional
 # =========================
 # Telegram notify
 # =========================
-def tg_send(msg: str):
+
+def _log_event(event: str, **fields):
+    if not LOG_EVENTS:
+        return
+    try:
+        rec = {"ts": int(time.time()), "event": str(event)}
+        for k, v in fields.items():
+            # jsonable coercion
+            try:
+                json.dumps(v)
+                rec[k] = v
+            except Exception:
+                rec[k] = str(v)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def _tg_keyboard():
+    # ReplyKeyboardMarkup: buttons send text messages (works with simple getUpdates polling).
+    return {
+        "keyboard": [
+            ["▶️ /start", "⏹ /stop"],
+            ["🛡 /safe", "⚔️ /aggro"],
+            ["📊 /status", "❓ /help"],
+            ["🟢 /buy", "🔴 /short", "💥 /panic"],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "is_persistent": True,
+    }
+def tg_send(msg: str, reply_markup=None):
     print(msg, flush=True)
     if BOT_TOKEN and CHAT_ID:
         try:
+            payload = {"chat_id": CHAT_ID, "text": msg}
+            if reply_markup is not None:
+                payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
             requests.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                data={"chat_id": CHAT_ID, "text": msg},
+                data=payload,
                 timeout=10,
             )
         except Exception:
@@ -789,6 +1019,9 @@ class Trader:
             "AGGRO": {"lev": LEVERAGE_AGGRO, "order_usdt": ORDER_USDT_AGGRO, "enter_score": ENTER_SCORE_AGGRO},
         }
 
+        # --- local strategy guard (fallback if quant_core perf not available) ---
+        self._sg = StrategyGuard() if StrategyGuard is not None else None
+
         self.positions = []  # dict list
         # --- stats / day reset ---
         self.win = 0
@@ -815,6 +1048,9 @@ class Trader:
         self._cooldown_until = 0
         self._last_alert_ts = 0
         self._last_err_ts = 0
+        # circuit breaker
+        self._cb_err_count = 0
+        self._cb_window_start = 0.0
 
         # --- leverage cache ---
         self._lev_set_cache = {}
@@ -923,6 +1159,37 @@ class Trader:
         if time.time() - self._last_err_ts >= max(ALERT_COOLDOWN_SEC, 120):
             self._last_err_ts = time.time()
             self.notify(msg)
+
+
+    def _cb_on_error(self, where: str, exc: Exception):
+        if not CB_ON:
+            return
+        try:
+            now = time.time()
+            ws = float(getattr(self, "_cb_window_start", 0.0) or 0.0)
+            if (ws <= 0) or (now - ws > CB_WINDOW_SEC):
+                self._cb_window_start = now
+                self._cb_err_count = 0
+            self._cb_err_count = int(getattr(self, "_cb_err_count", 0) or 0) + 1
+            _log_event("api_error", where=where, err=str(exc), count=self._cb_err_count)
+            if self._cb_err_count >= CB_ERR_MAX:
+                self.trading_enabled = False
+                self._cooldown_until = now + CB_COOLDOWN_SEC
+                self.notify_throttled(f"🛑 CircuitBreaker: API 오류 {self._cb_err_count}회/{CB_WINDOW_SEC}s → 거래 OFF {int(CB_COOLDOWN_SEC/60)}분", 120)
+                self.state["last_event"] = "STOP: circuit breaker"
+        except Exception:
+            pass
+
+    def _cb_on_success(self):
+        if not CB_ON:
+            return
+        # decay error count slowly
+        try:
+            c = int(getattr(self, "_cb_err_count", 0) or 0)
+            if c > 0:
+                self._cb_err_count = max(0, c - 1)
+        except Exception:
+            pass
 
     def _reset_day(self):
         dk = _day_key_utc()
@@ -1057,17 +1324,33 @@ class Trader:
 
         avoid_low_rsi = bool(self.state.get("avoid_low_rsi", False))
 
-        if self.allow_long:
+        mtf = None
+        if USE_MTF_FILTER:
+            try:
+                mtf = _mtf_trend(symbol)
+                self.state["mtf"] = {"symbol": symbol, "interval": int(MTF_TREND_INTERVAL), "trend": mtf}
+            except Exception:
+                mtf = None
+
+        # MTF gate (HTF trend filter)
+        mtf_block_long = (mtf == "DOWN")
+        mtf_block_short = (mtf == "UP")
+
+        if self.allow_long and (not mtf_block_long):
             okL, reasonL, scoreL, slL, tpL, aL = compute_signal_and_exits(
                 symbol, "LONG", price, mp, avoid_low_rsi=avoid_low_rsi
             )
+        elif self.allow_long and mtf_block_long:
+            okL, reasonL, scoreL, slL, tpL, aL = False, f"MTF_BLOCK(LONG) trend={mtf}", -999, None, None, None
         else:
             okL, reasonL, scoreL, slL, tpL, aL = False, "LONG DISABLED", -999, None, None, None
 
-        if self.allow_short:
+        if self.allow_short and (not mtf_block_short):
             okS, reasonS, scoreS, slS, tpS, aS = compute_signal_and_exits(
                 symbol, "SHORT", price, mp, avoid_low_rsi=avoid_low_rsi
             )
+        elif self.allow_short and mtf_block_short:
+            okS, reasonS, scoreS, slS, tpS, aS = False, f"MTF_BLOCK(SHORT) trend={mtf}", -999, None, None, None
         else:
             okS, reasonS, scoreS, slS, tpS, aS = False, "SHORT DISABLED", -999, None, None, None
 
@@ -1129,10 +1412,19 @@ class Trader:
             self.state["sync_error"] = str(e)
 
     # ---------------- enter/exit helpers ----------------
-    def _enter(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float, strategy: str = "", score: float = 0.0):
+    def _enter(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float, strategy: str = "", score: float = 0.0, atr: float = 0.0):
         mp = self._mp()
         lev = float(mp["lev"])
         order_usdt = float(mp["order_usdt"])
+
+        # --- volatility position sizing (ATR/price) ---
+        if USE_VOL_POSITION:
+            try:
+                scale = _vol_scale_from_atr(float(price), float(atr) if atr is not None else None)
+                order_usdt = float(order_usdt) * float(scale)
+                self.state["vol"] = {"symbol": symbol, "scale": float(scale), "target": float(VOL_TARGET)}
+            except Exception:
+                pass
 
         # --- portfolio optimizer: order_usdt multiplier ---
         try:
@@ -1240,6 +1532,7 @@ class Trader:
         self.state["entry_reason"] = reason
 
         self.notify(f"✅ ENTER {symbol} {side} qty={qty}\n{reason}\n⏳ stop={sl:.6f} tp={tp:.6f} tp1={tp1_price}")
+        _log_event("enter", symbol=symbol, side=side, qty=qty, price=price, stop=sl, tp=tp, strategy=strategy, score=float(score or 0.0), order_usdt=order_usdt, lev=lev, vol_scale=self.state.get('vol', {}).get('scale'))
 
     def _close_qty(self, symbol: str, side: str, close_qty: float):
         if DRY_RUN:
@@ -1290,7 +1583,12 @@ class Trader:
 
         entry_price = float(pos.get("entry_price") or 0)
         notional = float(pos.get("last_order_usdt") or 0) * float(pos.get("last_lev") or 0)
-        pnl_est = estimate_pnl_usdt(side, entry_price, price, notional)
+                pnl_real = _get_realized_pnl_usdt(symbol, float(pos.get("entry_ts") or 0))
+        pnl_est = pnl_real if (pnl_real is not None) else estimate_pnl_usdt(side, entry_price, price, notional)
+        if pnl_real is not None:
+            self.state["last_pnl_source"] = "REALIZED"
+        else:
+            self.state["last_pnl_source"] = "ESTIMATED"
         self.day_profit += pnl_est
         _ai_record_pnl(pnl_est)
 
@@ -1298,6 +1596,13 @@ class Trader:
         try:
             if USE_STRATEGY_PERF and self._perf is not None:
                 self._perf.record_trade(str(pos.get("strategy") or ""), float(pnl_est))
+        except Exception:
+            pass
+
+        # --- local strategy guard learning (fallback) ---
+        try:
+            if (not USE_STRATEGY_PERF or self._perf is None) and self._sg is not None:
+                self._sg.record(str(pos.get("strategy") or ""), float(pnl_est))
         except Exception:
             pass
         self._trade_count_total += 1
@@ -1313,6 +1618,7 @@ class Trader:
             self.consec_losses += 1
 
         self.notify(f"✅ EXIT {symbol} {side} ({why}) price={price:.6f} pnl≈{pnl_est:.2f} day≈{self.day_profit:.2f} (W{self.win}/L{self.loss})")
+        _log_event("exit", symbol=symbol, side=side, why=why, exit_price=price, entry_price=entry_price, pnl=float(pnl_est), pnl_source=self.state.get('last_pnl_source'))
         self.positions.pop(idx)
         self._maybe_ai_grow()
 
@@ -1481,7 +1787,10 @@ class Trader:
             return
 
         if c0 == "/status":
-            self.notify(self.status_text())
+            if TG_BUTTONS_ON:
+                tg_send(self.status_text(), reply_markup=_tg_keyboard())
+            else:
+                self.notify(self.status_text())
             return
 
         if c0 == "/buy":
@@ -1500,7 +1809,18 @@ class Trader:
             return
 
         if c0 in ("/help", "help"):
-            self.notify(self.help_text())
+            if TG_BUTTONS_ON:
+                tg_send(self.help_text(), reply_markup=_tg_keyboard())
+            else:
+                self.notify(self.help_text())
+            return
+
+        if c0 == "/ui":
+            v = (arg or "").lower()
+            on = (v in ("on","1","true","yes","y"))
+            global TG_BUTTONS_ON
+            TG_BUTTONS_ON = on
+            self.notify(f"🧩 TG_BUTTONS_ON={TG_BUTTONS_ON}")
             return
 
         if c0.startswith("/"):
@@ -1714,8 +2034,17 @@ class Trader:
             return
 
         # discovery + exchange sync
-        self._refresh_discovery()
-        self._sync_real_positions()
+        try:
+            self._refresh_discovery()
+            self._cb_on_success()
+        except Exception as e:
+            self._cb_on_error("refresh_discovery", e)
+
+        try:
+            self._sync_real_positions()
+            self._cb_on_success()
+        except Exception as e:
+            self._cb_on_error("sync_real_positions", e)
         # institutional portfolio weights (periodic)
         try:
             self._recalc_inst_weights()
@@ -1738,6 +2067,7 @@ class Trader:
                     self._manage_one(idx)
                 except Exception as e:
                     self.err_throttled(f"❌ manage 실패: {e}")
+                    self._cb_on_error("manage", e)
             return
 
         # ===== runtime persist =====
@@ -1756,14 +2086,17 @@ class Trader:
         # entry gating
         if time.time() < getattr(self, "_cooldown_until", 0):
             self.state["last_event"] = "대기: cooldown"
+            _log_event("skip", why="cooldown")
             return
 
         if getattr(self, "_day_entries", 0) >= MAX_ENTRIES_PER_DAY:
             self.state["last_event"] = "대기: 일일 진입 제한"
+            _log_event("skip", why="max_entries_per_day")
             return
 
         if not entry_allowed_now_utc():
             self.state["last_event"] = f"대기: 시간필터(UTC {TRADE_HOURS_UTC})"
+            _log_event("skip", why="time_filter", trade_hours_utc=TRADE_HOURS_UTC)
             return
 
         # fixed symbol mode
@@ -1793,10 +2126,20 @@ class Trader:
                 except Exception:
                     pass
 
-                self._enter(symbol, info["side"], price, info["reason"], info["sl"], info["tp"], str(info.get("strategy") or ""), float(info.get("score") or 0.0))
+                # --- local strategy guard gate (fallback) ---
+                try:
+                    if (not USE_STRATEGY_PERF or self._perf is None) and self._sg is not None:
+                        if not self._sg.allow(str(info.get("strategy") or "")):
+                            self.state["last_event"] = "대기: 전략 성과(로컬)"
+                            return
+                except Exception:
+                    pass
+
+                self._enter(symbol, info["side"], price, info["reason"], info["sl"], info["tp"], str(info.get("strategy") or ""), float(info.get("score") or 0.0), float(info.get("atr") or 0.0))
                 self.state["last_event"] = f"ENTER {symbol} {info['side']}"
             except Exception as e:
                 self.err_throttled(f"❌ entry 실패(fixed): {e}")
+                self._cb_on_error("entry_fixed", e)
             return
 
         # scan mode
@@ -1816,9 +2159,19 @@ class Trader:
             except Exception:
                 pass
 
-            self._enter(pick["symbol"], pick["side"], pick["price"], pick["reason"], pick["sl"], pick["tp"], str(pick.get("strategy") or ""), float(pick.get("score") or 0.0))
+            # --- local strategy guard gate (fallback) ---
+            try:
+                if (not USE_STRATEGY_PERF or self._perf is None) and self._sg is not None:
+                    if not self._sg.allow(str(pick.get("strategy") or "")):
+                        self.state["last_event"] = "대기: 전략 성과(로컬)"
+                        return
+            except Exception:
+                pass
+
+            self._enter(pick["symbol"], pick["side"], pick["price"], pick["reason"], pick["sl"], pick["tp"], str(pick.get("strategy") or ""), float(pick.get("score") or 0.0), float(pick.get("atr") or 0.0))
         except Exception as e:
             self.err_throttled(f"❌ entry 실패(scan): {e}")
+            self._cb_on_error("entry_scan", e)
 
     def public_state(self):
         mp = self._mp()
@@ -1968,6 +2321,9 @@ def order_market(symbol: str, side: str, qty: float, reduce_only=False):
             "qty": str(qty),
             "timeInForce": "IOC",
         }
+        _pidx = _position_idx_for(side)
+        if _pidx is not None:
+            body["positionIdx"] = _pidx
         if reduce_only:
             body["reduceOnly"] = True
         resp = http.request("POST", "/v5/order/create", body, auth=True)
@@ -1992,6 +2348,9 @@ def order_market(symbol: str, side: str, qty: float, reduce_only=False):
         "timeInForce": "IOC",
         "orderLinkId": order_link_id,
     }
+    _pidx = _position_idx_for(side)
+    if _pidx is not None:
+        body["positionIdx"] = _pidx
     if reduce_only:
         body["reduceOnly"] = True
 
@@ -2161,13 +2520,13 @@ if FINAL10_ON:
 if FINAL10_ON:
     _orig_enter = getattr(Trader, "_enter", None)
     if _orig_enter:
-        def _enter_final10(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float):
+        def _enter_final10(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float, *args, **kwargs):
             block = _final10_corr_guard_block(self, symbol)
             if block:
                 self.state["last_event"] = f"대기: {block}"
                 self.notify_throttled(f"⛔ 진입 차단({symbol}): {block}", 120)
                 return
-            return _orig_enter(self, symbol, side, price, reason, sl, tp)
+            return _orig_enter(self, symbol, side, price, reason, sl, tp, *args, **kwargs)
         Trader._enter = _enter_final10
 
 # Wrap tick: reconcile early + persist more settings always
