@@ -1787,7 +1787,7 @@ class Trader:
             return
 
         if c0 == "/status":
-            if TG_BUTTONS_ON:
+            if self.state.get("tg_buttons_on", False):
                 tg_send(self.status_text(), reply_markup=_tg_keyboard())
             else:
                 self.notify(self.status_text())
@@ -1808,24 +1808,13 @@ class Trader:
             self.notify("🚨 PANIC: 청산 시도 + 거래 OFF")
             return
 
-        if c0 == "/ui":
-            v = (arg or "").lower()
-            on = (v in ("on", "1", "true", "yes", "y"))
-            try:
-                globals()["TG_BUTTONS_ON"] = on
-            except Exception:
-                pass
-            self.state["tg_buttons_on"] = on
-            self.notify(f"🧩 TG_BUTTONS_ON = {'ON' if on else 'OFF'}")
-            return
+       if c0 == "/ui":
+           v = (arg or "").lower()
+           on = v in ("on", "1", "true", "yes", "y")
 
-        if c0.startswith("/ui"):
-            v = (arg or "").lower()
-            on = (v in ("on","1","true","yes","y"))
-            TG_BUTTONS_ON = on
-            self.state["tg_buttons_on"] = on
-            self.notify(f"🧩 UI {'ON' if on else 'OFF'}")
-            return
+           self.state["tg_buttons_on"] = on
+           self.notify(f"🧩 UI {'ON' if on else 'OFF'}")
+           return
 
         if c0.startswith("/"):
             self.notify("❓ 모르는 명령. /help")
