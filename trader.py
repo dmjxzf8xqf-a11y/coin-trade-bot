@@ -1664,6 +1664,7 @@ class Trader:
     # ---------------- Telegram commands ----------------
     def handle_command(self, text: str):
         cmd = (text or "").strip()
+        global TG_BUTTONS_ON
         if not cmd:
             return
 
@@ -1818,10 +1819,7 @@ class Trader:
         if c0.startswith("/ui"):
             v = (arg or "").lower()
             on = (v in ("on","1","true","yes","y"))
-
-            global TG_BUTTONS_ON
             TG_BUTTONS_ON = on
-
             self.state["tg_buttons_on"] = on
             self.notify(f"🧩 UI {'ON' if on else 'OFF'}")
             return
