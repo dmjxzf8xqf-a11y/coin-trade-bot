@@ -713,7 +713,7 @@ def estimate_pnl_usdt(side: str, entry_price: float, exit_price: float, notional
 # Telegram notify
 # =========================
 def tg_send(msg: str):
-    print(msg)
+    print(msg, flush=True)
     if BOT_TOKEN and CHAT_ID:
         try:
             requests.post(
@@ -724,11 +724,32 @@ def tg_send(msg: str):
         except Exception:
             pass
 
-def _ai_record_pnl(pnl_est: float):
+
+def _is_order_status_unknown(err: Exception) -> bool:
     try:
-        record_trade_result(float(pnl_est))
+        s = str(err)
     except Exception:
-        pass
+        return False
+    return "ORDER STATUS UNKNOWN" in s and "safer stop" in s
+
+def _ai_record_pnl(pnl_est: float):
+    """Record trade result into ai_learn (Supabase/JSON).
+    By default we DO NOT count near-breakeven trades as win/loss to avoid skew from fees/rounding.
+    Tune via env:
+      - AI_COUNT_BREAKEVEN=1  (count pnl==0 as loss per original logic)
+      - AI_PNL_EPS=0.01       (ignore |pnl| < eps, default 0.01)
+      - AI_LEARN_DEBUG=1      (print errors)
+    """
+    try:
+        pnl = float(pnl_est or 0.0)
+        eps = float(os.getenv("AI_PNL_EPS", "0.01"))
+        count_be = str(os.getenv("AI_COUNT_BREAKEVEN", "0")).lower() in ("1","true","yes","y","on")
+        if (abs(pnl) < eps) and (not count_be):
+            return  # neutral -> don't update wins/losses
+        record_trade_result(pnl)
+    except Exception as e:
+        if str(os.getenv("AI_LEARN_DEBUG","0")).lower() in ("1","true","yes","y","on"):
+            print("❌ ai_learn record_trade_result error:", repr(e), flush=True)
 
 # =========================
 # Trader
@@ -1169,10 +1190,25 @@ class Trader:
 
         if not DRY_RUN:
             side_ex = "Buy" if side == "LONG" else "Sell"
-            if USE_EXECUTION_ENGINE and self._exec is not None:
-                self._exec.market(symbol, side_ex, qty, reduce_only=False)
-            else:
-                order_market(symbol, side_ex, qty)
+            try:
+                if USE_EXECUTION_ENGINE and self._exec is not None:
+                    self._exec.market(symbol, side_ex, qty, reduce_only=False)
+                else:
+                    order_market(symbol, side_ex, qty)
+            except Exception as e:
+                # Bybit sometimes returns "ORDER STATUS UNKNOWN" even if the order actually executed.
+                # Confirm by checking real position size; if it exists, treat as success.
+                if _is_order_status_unknown(e):
+                    try:
+                        if get_position_size(symbol) > 0:
+                            self.notify_throttled(f"⚠️ 주문 상태 확인 지연(UNKNOWN) - 포지션 존재로 성공 처리: {symbol}")
+                        else:
+                            raise
+                    except Exception:
+                        raise
+                else:
+                    raise
+
 
         tp1_price = None
         if PARTIAL_TP_ON:
@@ -1212,10 +1248,22 @@ class Trader:
             return
 
         side_ex = "Sell" if side == "LONG" else "Buy"
-        if USE_EXECUTION_ENGINE and self._exec is not None:
-            self._exec.market(symbol, side_ex, close_qty, reduce_only=True)
-        else:
-            order_market(symbol, side_ex, close_qty, reduce_only=True)
+
+        try:
+            if USE_EXECUTION_ENGINE and self._exec is not None:
+                self._exec.market(symbol, side_ex, close_qty, reduce_only=True)
+            else:
+                order_market(symbol, side_ex, close_qty, reduce_only=True)
+        except Exception as e:
+            # Bybit sometimes returns "ORDER STATUS UNKNOWN" even if the order actually executed.
+            # Confirm by checking real position size; if already closed, treat as success.
+            if _is_order_status_unknown(e):
+                try:
+                    if get_position_size(symbol) <= 0:
+                        return
+                except Exception:
+                    pass
+            raise
 
     def _exit_position(self, idx: int, why: str, force=False):
         if idx < 0 or idx >= len(self.positions):
@@ -1968,9 +2016,27 @@ def order_market(symbol: str, side: str, qty: float, reduce_only=False):
         return resp
     if st2 in ("Rejected", "Cancelled"):
         raise Exception(f"ORDER {st2}: {od2 or resp}")
+    # If still unknown, try a last-resort position check.
+    # This reduces false "UNKNOWN" errors caused by transient order-status lookup failures.
+    try:
+        plist = get_positions_all()
+        for p in plist or []:
+            if (p.get("symbol") or "").upper() != (symbol or "").upper():
+                continue
+            sz = float(p.get("size") or 0.0)
+            ps = (p.get("side") or "").strip()
+            # For entry: if we now have any size on that symbol, assume filled.
+            if (not reduce_only) and sz > 0:
+                return resp
+            # For reduce-only exit: if size is zero, assume closed.
+            if reduce_only and sz == 0:
+                return resp
+    except Exception:
+        pass
 
     # If still unknown, treat as failure (safer than assuming filled)
     raise Exception(f"ORDER STATUS UNKNOWN (safer stop): symbol={symbol} side={side} qty={qty} linkId={order_link_id}")
+
 
 # ----------------------------
 # Trader patches (monkey patch)
