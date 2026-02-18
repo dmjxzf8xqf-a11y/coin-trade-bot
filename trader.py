@@ -1583,7 +1583,7 @@ class Trader:
 
         entry_price = float(pos.get("entry_price") or 0)
         notional = float(pos.get("last_order_usdt") or 0) * float(pos.get("last_lev") or 0)
-                pnl_real = _get_realized_pnl_usdt(symbol, float(pos.get("entry_ts") or 0))
+        pnl_real = _get_realized_pnl_usdt(symbol, float(pos.get("entry_ts") or 0))
         pnl_est = pnl_real if (pnl_real is not None) else estimate_pnl_usdt(side, entry_price, price, notional)
         if pnl_real is not None:
             self.state["last_pnl_source"] = "REALIZED"
