@@ -18,8 +18,9 @@ state = {
 
 trader = Trader(state)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+CHAT_ID = os.getenv("CHAT_ID", "")
+
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else ""
 
 
@@ -33,94 +34,93 @@ def health():
     return jsonify({**state, **(trader.public_state() if hasattr(trader, "public_state") else {})})
 
 
-@app.get("/metrics")
-def metrics():
-    # lightweight operational snapshot
-    base = {**state, **(trader.public_state() if hasattr(trader, "public_state") else {})}
-    return jsonify(base)
-
-@app.get("/equity")
-def equity():
-    # If your bot stores equity/trade logs elsewhere, expose them here. Safe default: just state.
-    return jsonify({"ok": True, "note": "equity series not wired in this build", "state": state})
-
-
-# â íë ê·¸ë¨ ìë°ì´í¸ ê°ì ¸ì¤ê¸°
-def _tg_get_updates(offset=None, timeout=25):
+def tg_send(msg):
+    print(msg, flush=True)
     if not TELEGRAM_API:
-        return {"ok": False, "result": []}
-    params = {"timeout": timeout}
-    if offset:
-        params["offset"] = offset
-    r = requests.get(f"{TELEGRAM_API}/getUpdates", params=params, timeout=timeout + 5)
-    return r.json()
+        return
+    try:
+        requests.post(
+            f"{TELEGRAM_API}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=10,
+        )
+    except Exception as e:
+        print("❌ TG send error:", e, flush=True)
 
 
-# â íë ê·¸ë¨ í´ë§ ë£¨í
+def handle_command(text):
+    try:
+        print(f"📩 CMD: {text}", flush=True)
+
+        if text == "/start":
+            state["running"] = True
+            tg_send("✅ START")
+
+        elif text == "/stop":
+            state["running"] = False
+            tg_send("⛔ STOP")
+
+        elif text == "/status":
+            tg_send(str(trader.public_state()))
+
+        elif text == "/buy":
+            tg_send("🟢 BUY")
+            trader.manual_buy()
+
+        elif text == "/sell":
+            tg_send("🔴 SELL")
+            trader.manual_sell()
+
+    except Exception as e:
+        print("❌ handler crash:", e, flush=True)
+
+
 def telegram_loop():
-    print("â Telegram polling started")
     offset = None
 
     while True:
         try:
-            data = _tg_get_updates(offset)
+            r = requests.get(
+                f"{TELEGRAM_API}/getUpdates",
+                params={"timeout": 10, "offset": offset},
+                timeout=15,
+            )
+            data = r.json()
 
-            if not data.get("ok"):
-                time.sleep(2)
-                continue
+            for item in data.get("result", []):
+                offset = item["update_id"] + 1
+                msg = item.get("message", {})
+                text = msg.get("text", "")
 
-            for update in data["result"]:
-                offset = update["update_id"] + 1
-
-                msg = update.get("message") or {}
-                text = (msg.get("text") or "").strip()
-                chat_id = str(msg.get("chat", {}).get("id", ""))
-
-                if not text:
-                    continue
-
-                print(f"ð© {chat_id}: {text}")
-                state["last_telegram"] = text
-
-                # CHAT_ID ì í ì¬ì© ì
-                if CHAT_ID and chat_id != CHAT_ID:
-                    print("â ë¤ë¥¸ ì±í ë¬´ì")
-                    continue
-
-                try:
-                    trader.handle_command(text)
-                except Exception as e:
-                    print("â handle_command error:", e)
+                if text:
+                    handle_command(text)
 
         except Exception as e:
-            print("â telegram_loop error:", e)
+            print("❌ polling error:", e, flush=True)
+            time.sleep(3)
 
-        time.sleep(1)
 
-
-# â í¸ë ì´ë© ë£¨í
-def loop():
-    state["running"] = True
-    trader.notify("ð¤ ë´ ììë¨")
-
+def trading_loop():
     while True:
         try:
-            state["last_heartbeat"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            trader.tick()
-            state["last_error"] = None
+            if state["running"]:
+                trader.tick()
+            state["last_heartbeat"] = time.time()
+            time.sleep(5)
         except Exception as e:
-            state["last_error"] = str(e)
-            trader.notify(f"â ë£¨í ìë¬: {e}")
-
-        time.sleep(int(os.getenv("LOOP_SECONDS", "20")))
+            print("❌ trading loop crash:", e, flush=True)
+            time.sleep(3)
 
 
 if __name__ == "__main__":
-    # â íë ê·¸ë¨ ë£¨í
+    print("🚀 Bot starting...", flush=True)
+
     threading.Thread(target=telegram_loop, daemon=True).start()
+    threading.Thread(target=trading_loop, daemon=True).start()
 
-    # â í¸ë ì´ë© ë£¨í
-    threading.Thread(target=loop, daemon=True).start()
-
-    port = int(os.getenv("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port)
+    while True:
+        try:
+            app.run(host="0.0.0.0", port=8080)
+        except Exception as e:
+            print("❌ Flask crash, restarting:", e, flush=True)
+            time.sleep(2)
