@@ -1664,7 +1664,6 @@ class Trader:
     # ---------------- Telegram commands ----------------
     def handle_command(self, text: str):
         cmd = (text or "").strip()
-        global TG_BUTTONS_ON
         if not cmd:
             return
 
@@ -1809,12 +1808,16 @@ class Trader:
             self.notify("🚨 PANIC: 청산 시도 + 거래 OFF")
             return
 
-        if c0 in ("/help", "help"):
-            if TG_BUTTONS_ON:
-                tg_send(self.help_text(), reply_markup=_tg_keyboard())
-            else:
-                self.notify(self.help_text())
-            return
+        if c0 == "/ui":
+    v = (arg or "").lower()
+    on = (v in ("on", "1", "true", "yes", "y"))
+    try:
+        globals()["TG_BUTTONS_ON"] = on
+    except Exception:
+        pass
+    self.state["tg_buttons_on"] = on
+    self.notify(f"🧩 TG_BUTTONS_ON = {'ON' if on else 'OFF'}")
+    return
 
         if c0.startswith("/ui"):
             v = (arg or "").lower()
