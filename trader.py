@@ -1816,11 +1816,16 @@ class Trader:
             return
 
         if c0 == "/ui":
-    v = (arg or "").lower()
-    on = (v in ("on", "1", "true", "yes", "y"))
-    self.tg_buttons_on = on
-    self.notify(f"🧩 TG_BUTTONS_ON = {'ON' if on else 'OFF'}")
-    return
+            # 사용법: /ui on|off  (텔레그램 버튼 UI 사용 여부)
+            v = (arg or "").lower()
+            on = (v in ("on", "1", "true", "yes", "y"))
+            try:
+                globals()["TG_BUTTONS_ON"] = on  # 런타임 토글 (config 상수 override)
+            except Exception:
+                pass
+            self.state["tg_buttons_on"] = on
+            self.notify(f"🧩 TG_BUTTONS_ON = {'ON' if on else 'OFF'}")
+            return
 
         if c0.startswith("/"):
             self.notify("❓ 모르는 명령. /help")
