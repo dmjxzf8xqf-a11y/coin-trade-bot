@@ -1816,15 +1816,15 @@ class Trader:
             return
 
         if c0.startswith("/ui"):
-    v = (arg or "").lower()
-    on = (v in ("on","1","true","yes","y"))
+            v = (arg or "").lower()
+            on = (v in ("on","1","true","yes","y"))
 
-    global TG_BUTTONS_ON
-    TG_BUTTONS_ON = on
+            global TG_BUTTONS_ON
+            TG_BUTTONS_ON = on
 
-    self.state["tg_buttons_on"] = on
-    self.notify(f"🧩 UI {'ON' if on else 'OFF'}")
-    return
+            self.state["tg_buttons_on"] = on
+            self.notify(f"🧩 UI {'ON' if on else 'OFF'}")
+            return
 
         if c0.startswith("/"):
             self.notify("❓ 모르는 명령. /help")
