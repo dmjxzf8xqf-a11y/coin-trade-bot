@@ -941,19 +941,26 @@ def _tg_keyboard():
     }
 def tg_send(msg: str, reply_markup=None):
     print(msg, flush=True)
-    if BOT_TOKEN and CHAT_ID:
-        try:
-            payload = {"chat_id": CHAT_ID, "text": msg}
-            if reply_markup is not None:
-                payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
-            requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                data=payload,
-                timeout=10,
-            )
-        except Exception:
-            pass
 
+    if not BOT_TOKEN or not CHAT_ID:
+        print("tg_send skip: missing BOT_TOKEN or CHAT_ID", flush=True)
+        return
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": msg,
+    }
+
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        print("tg_send status:", r.status_code, flush=True)
+        print("tg_send resp:", r.text, flush=True)
+    except Exception as e:
+        print("tg_send error:", repr(e), flush=True)
 
 def _is_order_status_unknown(err: Exception) -> bool:
     try:
