@@ -1676,8 +1676,11 @@ class Trader:
             return
 
         parts = cmd.split()
-        c0 = parts[0].lower()
-        arg = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
+        c0 = ""
+        for p in parts:
+            if p.startswith("/"):
+                c0 = p.lower()
+                break
 
         if c0 == "/start":
             self.trading_enabled = True
