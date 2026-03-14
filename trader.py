@@ -927,9 +927,6 @@ def _log_event(event: str, **fields):
         pass
 
 def _tg_keyboard():
-    # ReplyKeyboardMarkup: buttons send text messages (works with simple getUpdates polling).
-    return {
-def _tg_keyboard():
     return {
         "keyboard": [
             ["/start", "/stop"],
