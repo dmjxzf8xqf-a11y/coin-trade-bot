@@ -929,11 +929,12 @@ def _log_event(event: str, **fields):
 def _tg_keyboard():
     # ReplyKeyboardMarkup: buttons send text messages (works with simple getUpdates polling).
     return {
+def _tg_keyboard():
+    return {
         "keyboard": [
-            ["▶️ /start", "⏹ /stop"],
-            ["🛡 /safe", "⚔️ /aggro"],
-            ["📊 /status", "❓ /help"],
-            ["🟢 /buy", "🔴 /short", "💥 /panic"],
+            ["/start", "/stop"],
+            ["/safe", "/aggro"],
+            ["/status", "/help"],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
