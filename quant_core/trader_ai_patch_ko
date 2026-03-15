@@ -1,0 +1,103 @@
+# trader_ai_patch_ko.py
+TRADER_PATCH_GUIDE = '''
+[1] 상단 import 추가
+from market_regime import detect_market_regime_from_ohlcv
+from strategy_router import select_strategy, compute_ai_enter_score, should_block_trade
+from risk_adaptor import adapt_position_size
+from ai_learn import record_trade_result_ex
+from telegram_command_parser import parse_command_text
+
+[2] 텔레그램 버튼 함수 교체
+def _tg_keyboard():
+    return {
+        "keyboard": [
+            ["▶️ 시작 /start", "⏹️ 중지 /stop"],
+            ["🛡️ 안전 /safe", "⚔️ 공격 /aggro"],
+            ["📊 상태 /status", "❓ 도움말 /help"],
+            ["🟢 매수 /buy", "🔴 숏 /short", "💥 긴급청산 /panic"],
+            ["🎛️ 버튼켜기 /ui on", "🎛️ 버튼끄기 /ui off"],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "is_persistent": True,
+    }
+
+[3] tg_send 교체
+def tg_send(msg: str, reply_markup=None):
+    print(msg, flush=True)
+    if not BOT_TOKEN or not CHAT_ID:
+        print("tg_send skip: missing BOT_TOKEN or CHAT_ID", flush=True)
+        return
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": msg}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        print("tg_send status:", r.status_code, flush=True)
+        print("tg_send resp:", r.text, flush=True)
+    except Exception as e:
+        print("tg_send error:", repr(e), flush=True)
+
+[4] handle_command 시작 부분 교체
+def handle_command(self, text: str):
+    c0, arg = parse_command_text(text)
+    if not c0:
+        return
+    self.state["last_cmd_ts"] = int(time.time())
+    self.state["last_cmd_text"] = text
+
+[5] /status 강화 예시
+if c0 == "/status":
+    self.state.setdefault("boot_ts", int(time.time()))
+    uptime = int(time.time()) - int(self.state.get("boot_ts", int(time.time())))
+    ai = get_ai_stats()
+    lines = []
+    lines.append("📊 상태")
+    lines.append(f"거래: {'ON' if self.trading_enabled else 'OFF'}")
+    lines.append(f"모드: {self.mode}")
+    lines.append(f"버튼UI: {'ON' if self.state.get('tg_buttons_on', False) else 'OFF'}")
+    lines.append(f"업타임: {uptime}초")
+    lines.append(f"연속손실: {self.consec_losses}")
+    lines.append(f"일손익: {round(getattr(self, 'day_profit', 0.0), 4)}")
+    lines.append(f"AI 거래수: {ai.get('trades', 0)}")
+    lines.append(f"AI 승률: {ai.get('winrate', 0)}%")
+    lines.append(f"AI 점수: {ai.get('global_score', 0)}")
+    lines.append(f"최근명령: {self.state.get('last_cmd_text', '-')}")
+    lines.append(f"최근에러: {self.state.get('last_error', '-')}")
+    msg = "\n".join(lines)
+    if self.state.get("tg_buttons_on", False):
+        tg_send(msg, reply_markup=_tg_keyboard())
+    else:
+        self.notify(msg)
+    return
+
+[6] 진입 직전 AI 보정 헬퍼
+def enhance_entry_with_ai(symbol: str, side: str, mp: dict, ohlcv: list):
+    regime = detect_market_regime_from_ohlcv(ohlcv)
+    strategy = select_strategy(regime)
+    base_enter_score = float(mp.get("enter_score", 60))
+    ai_enter_score = compute_ai_enter_score(symbol=symbol, side=side, strategy=strategy, regime=regime, base_enter_score=base_enter_score)
+    blocked, reason = should_block_trade(symbol=symbol, side=side, strategy=strategy, regime=regime, enter_score=ai_enter_score)
+    if blocked:
+        return {"ok": False, "reason": reason, "regime": regime, "strategy": strategy, "enter_score": ai_enter_score, "size_usdt": 0.0}
+    base_usdt = float(mp.get("base_usdt", 50))
+    size_usdt = adapt_position_size(base_usdt, ai_enter_score, regime)
+    mp["regime"] = regime
+    mp["strategy"] = strategy
+    mp["enter_score"] = ai_enter_score
+    mp["base_usdt"] = size_usdt
+    return {"ok": True, "reason": "AI 통과", "regime": regime, "strategy": strategy, "enter_score": ai_enter_score, "size_usdt": size_usdt}
+
+[7] 청산 후 기록
+def ai_record_closed_trade(symbol: str, side: str, strategy: str, regime: str, enter_score: float, pnl: float, reason: str = ""):
+    record_trade_result_ex(pnl=float(pnl), symbol=symbol, side=side, strategy=strategy, regime=regime, enter_score=float(enter_score), reason=reason)
+
+[8] 상태값 권장 추가
+self.state.setdefault("boot_ts", int(time.time()))
+self.state.setdefault("last_cmd_ts", 0)
+self.state.setdefault("last_cmd_text", "")
+self.state.setdefault("last_error", "")
+self.state.setdefault("last_order_result", "")
+self.state.setdefault("tg_buttons_on", TG_BUTTONS_ON)
+'''
