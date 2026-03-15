@@ -3378,3 +3378,195 @@ if HARDENING_ON:
             pass
 
     Trader.__init__ = _init_hard
+# =========================================================
+# ENTRY HARDENING PATCH v1
+# 목적:
+# - 횡보장/약추세/저변동성 구간 진입 차단
+# - 기존 구조 최대한 안 건드리고, 진입 전에 필터만 추가
+# =========================================================
+
+try:
+    _entry_hard_prev_compute = Trader.compute_signal_and_exits
+
+    def _safe_float(v, default=0.0):
+        try:
+            return float(v)
+        except Exception:
+            return default
+
+    def _ema_series(values, period: int):
+        if not values:
+            return []
+        k = 2.0 / (period + 1.0)
+        out = []
+        prev = float(values[0])
+        for x in values:
+            x = float(x)
+            prev = x * k + prev * (1.0 - k)
+            out.append(prev)
+        return out
+
+    def _atr_pct_from_candles(candles, period: int = 14):
+        try:
+            if not candles or len(candles) < period + 2:
+                return 0.0
+
+            trs = []
+            prev_close = _safe_float(candles[0].get("close"))
+            for c in candles[1:]:
+                h = _safe_float(c.get("high"))
+                l = _safe_float(c.get("low"))
+                cl = _safe_float(c.get("close"))
+                tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
+                trs.append(tr)
+                prev_close = cl
+
+            if len(trs) < period:
+                return 0.0
+
+            atr = sum(trs[-period:]) / period
+            last_close = _safe_float(candles[-1].get("close"), 1.0)
+            if last_close <= 0:
+                return 0.0
+            return atr / last_close
+        except Exception:
+            return 0.0
+
+    def _trend_strength_bps_from_closes(closes, fast=20, slow=50):
+        try:
+            if len(closes) < slow + 5:
+                return 0.0
+            ef = _ema_series(closes, fast)
+            es = _ema_series(closes, slow)
+            px = float(closes[-1]) if float(closes[-1]) != 0 else 1.0
+            gap = abs(ef[-1] - es[-1]) / px
+            return gap * 10000.0
+        except Exception:
+            return 0.0
+
+    def _rsi(values, period=14):
+        try:
+            if len(values) < period + 1:
+                return 50.0
+            gains, losses = [], []
+            for i in range(1, len(values)):
+                diff = float(values[i]) - float(values[i - 1])
+                gains.append(max(diff, 0.0))
+                losses.append(max(-diff, 0.0))
+            avg_gain = sum(gains[-period:]) / period
+            avg_loss = sum(losses[-period:]) / period
+            if avg_loss == 0:
+                return 100.0
+            rs = avg_gain / avg_loss
+            return 100.0 - (100.0 / (1.0 + rs))
+        except Exception:
+            return 50.0
+
+    def _entry_hardening_gate(self, symbol: str, side_hint: str = ""):
+        """
+        return: (ok: bool, why: str)
+        """
+        try:
+            # 환경변수 기본값
+            hard_on = str(os.getenv("HARDENING_ON", "true")).lower() in ("1", "true", "yes", "y", "on")
+            if not hard_on:
+                return True, ""
+
+            min_atr_pct = _safe_float(os.getenv("HARD_MIN_ATR_PCT", "0.0045"))
+            max_atr_pct = _safe_float(os.getenv("HARD_MAX_ATR_PCT", "0.03"))
+            min_ema_gap_pct = _safe_float(os.getenv("HARD_MIN_EMA_GAP_PCT", "0.0025"))
+            min_trend_bps = _safe_float(os.getenv("REGIME_MIN_SLOPE_BPS", "8"))
+            low_rsi_block = str(os.getenv("AVOID_LOW_RSI", "true")).lower() in ("1", "true", "yes", "y", "on")
+
+            # 기존 프로젝트에서 이미 쓰는 캔들 조회 함수 우선 사용
+            candles = None
+            for fn_name in ("get_klines", "get_candles", "fetch_klines", "fetch_candles"):
+                fn = globals().get(fn_name)
+                if callable(fn):
+                    try:
+                        # 흔한 시그니처 대응
+                        try:
+                            candles = fn(symbol, "15", 120)
+                        except Exception:
+                            try:
+                                candles = fn(symbol, 120)
+                            except Exception:
+                                candles = fn(symbol)
+                        if candles:
+                            break
+                    except Exception:
+                        pass
+
+            if not candles or len(candles) < 60:
+                return False, "hardening:no_candles"
+
+            closes = [_safe_float(c.get("close")) for c in candles if c]
+            if len(closes) < 60:
+                return False, "hardening:too_short"
+
+            atr_pct = _atr_pct_from_candles(candles, 14)
+            trend_bps = _trend_strength_bps_from_closes(closes, 20, 50)
+
+            ef = _ema_series(closes, 20)
+            es = _ema_series(closes, 50)
+            price = closes[-1] if closes[-1] != 0 else 1.0
+            ema_gap_pct = abs(ef[-1] - es[-1]) / price
+            rsi14 = _rsi(closes, 14)
+
+            # 1) 변동성 너무 낮음 = 횡보장 가능성 큼
+            if atr_pct < min_atr_pct:
+                return False, f"hardening:atr_low({atr_pct:.4f})"
+
+            # 2) 변동성 너무 높음 = 과열/잡음
+            if max_atr_pct > 0 and atr_pct > max_atr_pct:
+                return False, f"hardening:atr_high({atr_pct:.4f})"
+
+            # 3) EMA 간격이 너무 좁음 = 추세 약함
+            if ema_gap_pct < min_ema_gap_pct:
+                return False, f"hardening:ema_gap({ema_gap_pct:.4f})"
+
+            # 4) 추세 강도 부족
+            if trend_bps < min_trend_bps:
+                return False, f"hardening:trend_bps({trend_bps:.2f})"
+
+            # 5) RSI 역행/약세 차단
+            side_u = str(side_hint or "").upper()
+            if low_rsi_block:
+                if side_u in ("BUY", "LONG") and rsi14 < 52:
+                    return False, f"hardening:rsi_long({rsi14:.1f})"
+                if side_u in ("SELL", "SHORT") and rsi14 > 48:
+                    return False, f"hardening:rsi_short({rsi14:.1f})"
+
+            return True, ""
+        except Exception as e:
+            return False, f"hardening:error({e})"
+
+    def _entry_hard_compute_signal_and_exits(self, *args, **kwargs):
+        out = _entry_hard_prev_compute(self, *args, **kwargs)
+
+        try:
+            # 기존 반환이 dict라고 가정
+            if not isinstance(out, dict):
+                return out
+
+            signal = str(out.get("signal") or "").upper()
+            symbol = str(out.get("symbol") or kwargs.get("symbol") or "")
+            if signal not in ("BUY", "SELL", "LONG", "SHORT"):
+                return out
+
+            ok, why = _entry_hardening_gate(self, symbol, signal)
+            if not ok:
+                out["signal"] = None
+                out["why"] = why
+                try:
+                    self.state["last_skip_reason"] = why
+                except Exception:
+                    pass
+            return out
+        except Exception:
+            return out
+
+    Trader.compute_signal_and_exits = _entry_hard_compute_signal_and_exits
+
+except Exception as _entry_hard_patch_e:
+    print(f"[ENTRY_HARDENING_PATCH] load failed: {_entry_hard_patch_e}")
