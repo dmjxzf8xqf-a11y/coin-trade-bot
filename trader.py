@@ -3731,3 +3731,110 @@ try:
 
 except Exception as _eth_hard_patch_err:
     print(f"[ETH_ONLY_HARDENING_PATCH] load failed: {_eth_hard_patch_err}")
+# =========================================================
+# DEBUG PATCH: show current mp / skip reason / fixed symbol
+# append to END of trader.py
+# =========================================================
+
+try:
+    import os as _dbg_os
+    import time as _dbg_time
+
+    def _dbg_safe(v, d=None):
+        try:
+            return v if v is not None else d
+        except Exception:
+            return d
+
+    def _dbg_env(name, default=""):
+        try:
+            return _dbg_os.getenv(name, default)
+        except Exception:
+            return default
+
+    # -------------------------------
+    # status_text 확장
+    # -------------------------------
+    _orig_status_text_dbg = getattr(Trader, "status_text", None)
+    if callable(_orig_status_text_dbg):
+        def _dbg_status_text(self, *args, **kwargs):
+            base = _orig_status_text_dbg(self, *args, **kwargs)
+            try:
+                mp = {}
+                try:
+                    if hasattr(self, "_mp") and callable(self._mp):
+                        mp = self._mp() or {}
+                except Exception:
+                    mp = {}
+
+                fixed = str(_dbg_env("FIXED_SYMBOL", "")).upper() or "NONE"
+                last_skip = _dbg_safe(getattr(self, "state", {}).get("last_skip_reason"), "NONE")
+                last_event = _dbg_safe(getattr(self, "state", {}).get("last_event"), "NONE")
+                last_sym = _dbg_safe(getattr(self, "state", {}).get("last_symbol"), fixed)
+                auto_disc = _dbg_safe(getattr(self, "auto_discovery", None), False)
+
+                extra = []
+                extra.append(f"🧪 DBG fixed={fixed} auto={auto_disc} sym={last_sym}")
+                extra.append(
+                    f"🧮 DBG mp lev={_dbg_safe(mp.get('lev'), '?')} "
+                    f"usdt={_dbg_safe(mp.get('order_usdt'), '?')} "
+                    f"score>={_dbg_safe(mp.get('enter_score'), '?')} "
+                    f"stop_atr={_dbg_safe(mp.get('stop_atr'), '?')} "
+                    f"tp_r={_dbg_safe(mp.get('tp_r'), '?')}"
+                )
+                extra.append(f"🚫 DBG skip={last_skip}")
+                extra.append(f"📌 DBG event={last_event}")
+
+                return str(base) + "\n" + "\n".join(extra)
+            except Exception:
+                return base
+
+        Trader.status_text = _dbg_status_text
+
+    # -------------------------------
+    # tick 확장: 30초마다 bot.log에 현재 상태 출력
+    # -------------------------------
+    _orig_tick_dbg = getattr(Trader, "tick", None)
+    if callable(_orig_tick_dbg):
+        def _dbg_tick(self, *args, **kwargs):
+            rv = _orig_tick_dbg(self, *args, **kwargs)
+
+            try:
+                now = _dbg_time.time()
+                last_ts = float(getattr(self, "_dbg_last_log_ts", 0.0) or 0.0)
+                if now - last_ts >= 30:
+                    setattr(self, "_dbg_last_log_ts", now)
+
+                    mp = {}
+                    try:
+                        if hasattr(self, "_mp") and callable(self._mp):
+                            mp = self._mp() or {}
+                    except Exception:
+                        mp = {}
+
+                    fixed = str(_dbg_env("FIXED_SYMBOL", "")).upper() or "NONE"
+                    last_skip = _dbg_safe(getattr(self, "state", {}).get("last_skip_reason"), "NONE")
+                    last_event = _dbg_safe(getattr(self, "state", {}).get("last_event"), "NONE")
+                    last_sym = _dbg_safe(getattr(self, "state", {}).get("last_symbol"), fixed)
+                    auto_disc = _dbg_safe(getattr(self, "auto_discovery", None), False)
+
+                    print(
+                        "[DBG] "
+                        f"fixed={fixed} auto={auto_disc} sym={last_sym} "
+                        f"lev={_dbg_safe(mp.get('lev'), '?')} "
+                        f"usdt={_dbg_safe(mp.get('order_usdt'), '?')} "
+                        f"enter>={_dbg_safe(mp.get('enter_score'), '?')} "
+                        f"stop_atr={_dbg_safe(mp.get('stop_atr'), '?')} "
+                        f"tp_r={_dbg_safe(mp.get('tp_r'), '?')} "
+                        f"skip={last_skip} event={last_event}",
+                        flush=True,
+                    )
+            except Exception:
+                pass
+
+            return rv
+
+        Trader.tick = _dbg_tick
+
+except Exception as _dbg_patch_err:
+    print(f"[DEBUG_PATCH] load failed: {_dbg_patch_err}")
