@@ -929,9 +929,11 @@ def _log_event(event: str, **fields):
 def _tg_keyboard():
     return {
         "keyboard": [
-            ["/start", "/stop"],
-            ["/safe", "/aggro"],
-            ["/status", "/help"],
+            ["▶️ 시작 /start", "⏹️ 중지 /stop"],
+            ["🛡️ 안전 /safe", "⚔️ 공격 /aggro"],
+            ["📊 상태 /status", "❓ 도움말 /help"],
+            ["🟢 매수 /buy", "🔴 숏 /short", "💥 긴급청산 /panic"],
+            ["🎛️ 버튼켜기 /ui on", "🎛️ 버튼끄기 /ui off"],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
