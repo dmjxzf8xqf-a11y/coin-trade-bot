@@ -3258,3 +3258,123 @@ if FINAL10_ON:
 # ======================================================================
 # END ULTRA PATCH PACK v2
 # ======================================================================
+# =====================================================================
+# HARDENING PATCH - append to the VERY END of trader.py
+# 목적:
+# - 횡보장 진입 차단
+# - ADX / ATR / EMA gap 필터 추가
+# - enter_score 하한 강화
+# - avoid_low_rsi 기본 ON
+# =====================================================================
+
+HARDENING_ON = str(os.getenv("HARDENING_ON", "true")).lower() in ("1","true","yes","y","on")
+HARD_MIN_ADX = float(os.getenv("HARD_MIN_ADX", "18"))
+HARD_MIN_ATR_PCT = float(os.getenv("HARD_MIN_ATR_PCT", "0.0035"))
+HARD_MAX_ATR_PCT = float(os.getenv("HARD_MAX_ATR_PCT", "0.045"))
+HARD_MIN_EMA_GAP_PCT = float(os.getenv("HARD_MIN_EMA_GAP_PCT", "0.0018"))
+HARD_ENTER_SCORE_SAFE = int(os.getenv("HARD_ENTER_SCORE_SAFE", "70"))
+HARD_ENTER_SCORE_AGGRO = int(os.getenv("HARD_ENTER_SCORE_AGGRO", "65"))
+
+
+def _hard_adx(highs, lows, closes, period=14):
+    if len(closes) < period + 2:
+        return 0.0
+    tr_list, plus_dm, minus_dm = [], [], []
+    for i in range(1, len(closes)):
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus_dm.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
+        minus_dm.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        tr_list.append(tr)
+    if len(tr_list) < period:
+        return 0.0
+    atr_sm = sum(tr_list[:period]) / period
+    plus_sm = sum(plus_dm[:period]) / period
+    minus_sm = sum(minus_dm[:period]) / period
+    dx_values = []
+    for i in range(period, len(tr_list)):
+        atr_sm = ((atr_sm * (period - 1)) + tr_list[i]) / period
+        plus_sm = ((plus_sm * (period - 1)) + plus_dm[i]) / period
+        minus_sm = ((minus_sm * (period - 1)) + minus_dm[i]) / period
+        if atr_sm <= 0:
+            continue
+        plus_di = 100.0 * (plus_sm / atr_sm)
+        minus_di = 100.0 * (minus_sm / atr_sm)
+        denom = plus_di + minus_di
+        dx = 0.0 if denom <= 0 else 100.0 * abs(plus_di - minus_di) / denom
+        dx_values.append(dx)
+    if not dx_values:
+        return 0.0
+    tail = dx_values[-period:] if len(dx_values) >= period else dx_values
+    return sum(tail) / len(tail)
+
+
+if HARDENING_ON:
+    _orig_compute_signal_and_exits_hard = compute_signal_and_exits
+
+    def compute_signal_and_exits(symbol: str, side: str, price: float, mp: dict, avoid_low_rsi: bool = False):
+        avoid_low_rsi = True if avoid_low_rsi is False else avoid_low_rsi
+        ok, reason, score, sl, tp, a = _orig_compute_signal_and_exits_hard(symbol, side, price, mp, avoid_low_rsi=avoid_low_rsi)
+        if not ok:
+            return ok, reason, score, sl, tp, a
+
+        try:
+            kl = get_klines(symbol, ENTRY_INTERVAL, max(KLINE_LIMIT, EMA_SLOW * 3 + 60))
+            kl = list(reversed(kl))
+            closes = [float(x[4]) for x in kl]
+            highs = [float(x[2]) for x in kl]
+            lows = [float(x[3]) for x in kl]
+            adx_v = _hard_adx(highs, lows, closes, ATR_PERIOD)
+            atr_pct = (float(a) / float(price)) if price else 0.0
+            ef = ema(closes[-EMA_FAST * 3:], EMA_FAST)
+            es = ema(closes[-EMA_SLOW * 3:], EMA_SLOW)
+            ema_gap_pct = abs(ef - es) / max(price, 1e-9)
+            self_need = max(int(mp.get("enter_score", 0)), HARD_ENTER_SCORE_AGGRO if str(globals().get("MODE_DEFAULT", "SAFE")).upper() == "AGGRO" else HARD_ENTER_SCORE_SAFE)
+
+            if score < self_need:
+                return False, f"HARD_SCORE_BLOCK score={score} need={self_need}", score, sl, tp, a
+            if adx_v < HARD_MIN_ADX:
+                return False, f"HARD_ADX_BLOCK adx={adx_v:.2f} < {HARD_MIN_ADX}", score, sl, tp, a
+            if atr_pct < HARD_MIN_ATR_PCT:
+                return False, f"HARD_ATR_LOW atr_pct={atr_pct:.4f} < {HARD_MIN_ATR_PCT:.4f}", score, sl, tp, a
+            if atr_pct > HARD_MAX_ATR_PCT:
+                return False, f"HARD_ATR_HIGH atr_pct={atr_pct:.4f} > {HARD_MAX_ATR_PCT:.4f}", score, sl, tp, a
+            if ema_gap_pct < HARD_MIN_EMA_GAP_PCT:
+                return False, f"HARD_EMA_GAP_BLOCK gap={ema_gap_pct:.4f} < {HARD_MIN_EMA_GAP_PCT:.4f}", score, sl, tp, a
+            return True, reason + f" | ADX={adx_v:.2f} ATR%={atr_pct:.4f} GAP%={ema_gap_pct:.4f}", score, sl, tp, a
+        except Exception as e:
+            return False, f"HARD_FILTER_ERR {e}", score, sl, tp, a
+
+    _orig_apply_strategy_to_mp_hard = apply_strategy_to_mp
+
+    def apply_strategy_to_mp(symbol: str, mp: dict):
+        ok, msg, strategy = _orig_apply_strategy_to_mp_hard(symbol, mp)
+        if not ok:
+            return ok, msg, strategy
+        if strategy == "mean_reversion":
+            return False, "STRATEGY_BLOCK: mean_reversion disabled in hardening", strategy
+        if strategy in ("trend_long", "trend_short"):
+            mp["enter_score"] = max(int(mp.get("enter_score", 0)), HARD_ENTER_SCORE_SAFE)
+            mp["tp_r"] = max(float(mp.get("tp_r", 1.0)), 1.8)
+            mp["stop_atr"] = max(float(mp.get("stop_atr", 1.0)), 1.6)
+        return True, msg, strategy
+
+    _orig_init_hard = getattr(Trader, "__init__")
+
+    def _init_hard(self, state=None):
+        _orig_init_hard(self, state)
+        self.state["avoid_low_rsi"] = True
+        try:
+            if "SAFE" in self.tune:
+                self.tune["SAFE"]["enter_score"] = max(int(self.tune["SAFE"].get("enter_score", 0)), HARD_ENTER_SCORE_SAFE)
+            if "AGGRO" in self.tune:
+                self.tune["AGGRO"]["enter_score"] = max(int(self.tune["AGGRO"].get("enter_score", 0)), HARD_ENTER_SCORE_AGGRO)
+        except Exception:
+            pass
+
+    Trader.__init__ = _init_hard
