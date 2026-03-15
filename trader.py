@@ -1832,7 +1832,11 @@ class Trader:
             on = v in ("on", "1", "true", "yes", "y")
 
             self.state["tg_buttons_on"] = on
-            self.notify(f"🧩 UI {'ON' if on else 'OFF'}")
+
+            if on:
+                tg_send("🧩 UI ON", reply_markup=_tg_keyboard())
+            else:
+                tg_send("🧩 UI OFF", reply_markup={"remove_keyboard": True})
             return
 
         if c0.startswith("/"):
