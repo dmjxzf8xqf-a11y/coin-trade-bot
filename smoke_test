@@ -1,0 +1,21 @@
+# 실행 전 간단 점검용
+def quick_smoke_test():
+    import telegram_command_parser
+    import telegram_ui
+    import status_formatter
+    import ai_learn
+    import market_regime
+    import strategy_router
+    import risk_adaptor
+
+    # 최소 생성 확인
+    kb = telegram_ui.build_keyboard()
+    assert isinstance(kb, dict)
+    c0, arg = telegram_command_parser.extract_command_and_arg("📊 상태 /status")
+    assert c0 == "/status"
+    c0, arg = telegram_command_parser.extract_command_and_arg("🎛️ 버튼켜기 /ui on")
+    assert c0 == "/ui" and arg == "on"
+
+    txt = status_formatter.format_status_text({"trading_enabled": True, "boot_ts": 0})
+    assert isinstance(txt, str) and len(txt) > 0
+    return True
