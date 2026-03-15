@@ -1669,7 +1669,7 @@ class Trader:
             )
 
     # ---------------- Telegram commands ----------------
-            def handle_command(self, text: str):
+        def handle_command(self, text: str):
         cmd = (text or "").strip()
         if not cmd:
             return
