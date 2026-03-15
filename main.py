@@ -1,11 +1,14 @@
 import os
-from dotenv import load_dotenv
-load_dotenv()
 import time
 import threading
+
 import requests
+from dotenv import load_dotenv
 from flask import Flask, jsonify
 
+load_dotenv()
+
+import trader as trader_module
 from trader import Trader
 
 app = Flask(__name__)
@@ -14,7 +17,7 @@ app = Flask(__name__)
 # ENV
 # -------------------------
 BOT_TOKEN = (os.getenv("BOT_TOKEN", "") or "").strip()
-CHAT_ID_ENV = (os.getenv("CHAT_ID", "") or "").strip()  # 비워도 됨 (첫 대화한 chat_id 자동 저장)
+CHAT_ID_ENV = (os.getenv("CHAT_ID", "") or "").strip()
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else ""
 
 PROXY = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or ""
@@ -25,18 +28,20 @@ POLL_TIMEOUT = int(os.getenv("TG_POLL_TIMEOUT", "25"))
 POLL_SLEEP = float(os.getenv("TG_POLL_SLEEP", "0.5"))
 TRADING_TICK_SEC = float(os.getenv("TRADING_TICK_SEC", "5"))
 
-
 state = {
-    "running": False,
+    "running": True,
     "last_heartbeat": None,
     "last_event": None,
     "last_error": None,
     "last_telegram": None,
+    "chat_id": CHAT_ID_ENV or None,
 }
 
-trader = Trader(state)
+# Make trader module see the startup chat id immediately if present.
+if CHAT_ID_ENV:
+    trader_module.CHAT_ID = CHAT_ID_ENV
 
-# 런타임 chat_id (고정 CHAT_ID 없으면 여기에 저장)
+trader = Trader(state)
 _runtime_chat_id = CHAT_ID_ENV
 
 
@@ -55,7 +60,7 @@ def health():
 
 
 # -------------------------
-# Telegram send (reply_markup 지원 핵심)
+# Telegram helper for main-side notifications
 # -------------------------
 def tg_send(msg: str, reply_markup: dict | None = None):
     global _runtime_chat_id
@@ -64,23 +69,24 @@ def tg_send(msg: str, reply_markup: dict | None = None):
     if not TELEGRAM_API:
         return
 
-    chat_id = _runtime_chat_id
+    chat_id = _runtime_chat_id or CHAT_ID_ENV
     if not chat_id:
-        # 아직 chat_id를 모르면 전송 불가 (첫 메시지 들어오면 저장됨)
-        print("⚠️ TG chat_id unknown (CHAT_ID env empty). Waiting first incoming message.", flush=True)
+        print("â ï¸ TG chat_id unknown. Waiting for first incoming message.", flush=True)
         return
 
     payload = {"chat_id": chat_id, "text": msg}
     if reply_markup is not None:
-        payload["reply_markup"] = reply_markup  # ✅ dict 그대로 (json=payload로 전송)
+        payload["reply_markup"] = reply_markup
 
     try:
-        # ✅ IMPORTANT: json=payload (data= 쓰면 reply_markup가 깨지는 경우 많음)
         requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=15, proxies=PROXIES)
     except Exception as e:
-        print("❌ TG send error:", repr(e), flush=True)
+        print("â TG send error:", repr(e), flush=True)
 
 
+# -------------------------
+# Telegram polling
+# -------------------------
 def telegram_loop():
     global _runtime_chat_id
     offset = None
@@ -104,12 +110,14 @@ def telegram_loop():
                 msg = item.get("message", {}) or {}
                 text = (msg.get("text", "") or "").strip()
 
-                # ✅ chat_id 자동 저장 (CHAT_ID env 비워도 작동)
+                # Capture runtime chat id and mirror it into trader module,
+                # because trader.py uses its own module-level CHAT_ID in tg_send().
                 try:
                     chat_id = str((msg.get("chat") or {}).get("id") or "")
-                    if chat_id and (not _runtime_chat_id):
+                    if chat_id:
                         _runtime_chat_id = chat_id
-                        print(f"✅ TG chat_id captured: {_runtime_chat_id}", flush=True)
+                        state["chat_id"] = chat_id
+                        trader_module.CHAT_ID = chat_id
                 except Exception:
                     pass
 
@@ -117,46 +125,47 @@ def telegram_loop():
                     continue
 
                 state["last_telegram"] = time.time()
-                print(f"📩 CMD: {text}", flush=True)
+                print(f"ð© CMD: {text}", flush=True)
 
-                # ✅ 핵심: trader의 명령 처리로 넘김 (여기에 /ui, /help, 버튼 로직 다 있음)
                 try:
                     if hasattr(trader, "handle_command"):
                         trader.handle_command(text)
                     else:
-                        # fallback: 최소한의 핸들링
                         if text == "/status":
                             tg_send(str(trader.public_state()))
                 except Exception as e:
-                    print("❌ trader.handle_command crash:", repr(e), flush=True)
+                    print("â trader.handle_command crash:", repr(e), flush=True)
                     state["last_error"] = f"tg_cmd: {e}"
 
         except Exception as e:
-            print("❌ polling error:", repr(e), flush=True)
+            print("â polling error:", repr(e), flush=True)
             state["last_error"] = f"polling: {e}"
             time.sleep(3)
 
         time.sleep(POLL_SLEEP)
 
 
+# -------------------------
+# Trading loop
+# -------------------------
 def trading_loop():
     while True:
         try:
+            state["running"] = bool(getattr(trader, "trading_enabled", True))
             if state["running"]:
                 trader.tick()
             state["last_heartbeat"] = time.time()
             time.sleep(TRADING_TICK_SEC)
         except Exception as e:
-            print("❌ trading loop crash:", repr(e), flush=True)
+            print("â trading loop crash:", repr(e), flush=True)
             state["last_error"] = f"trading_loop: {e}"
             time.sleep(3)
 
 
 if __name__ == "__main__":
-    print("🚀 Bot starting...", flush=True)
+    print("ð Bot starting...", flush=True)
 
     threading.Thread(target=telegram_loop, daemon=True).start()
     threading.Thread(target=trading_loop, daemon=True).start()
 
-    # ✅ Railway는 while True로 app.run 반복 돌릴 필요 없음
     app.run(host="0.0.0.0", port=PORT)
