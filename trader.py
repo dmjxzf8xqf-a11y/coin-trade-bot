@@ -2650,369 +2650,611 @@ if FINAL10_ON:
 # ======================================================================
 
 
-# ===================== ENDGAME PATCH (2026-03-15) =====================
-# Added by ChatGPT:
-# - immediate runtime persistence helper
-# - stronger status panel
-# - manual entry gate alignment
-# - safer realized/estimated pnl handling after partial TP
-# - lightweight persistence on key state changes
 
-try:
-    ENDGAME_PATCH_ON = True
-except Exception:
-    ENDGAME_PATCH_ON = True
+# ======================================================================
+# ULTRA PATCH PACK v2 - recovery + realized pnl + strategy auto-weighting
+# ======================================================================
+ADVANCED_RUNTIME_FILE = data_path("advanced_runtime.json")
+ADV_STRAT_WINDOW = int(os.getenv("ADV_STRAT_WINDOW", "24"))
+ADV_STRAT_MIN_TRADES = int(os.getenv("ADV_STRAT_MIN_TRADES", "8"))
+ADV_STRAT_DISABLE_BELOW = float(os.getenv("ADV_STRAT_DISABLE_BELOW", "0.40"))
+ADV_STRAT_DISABLE_FOR_MIN = int(os.getenv("ADV_STRAT_DISABLE_FOR_MIN", "180"))
+ADV_STRAT_MAX_UP = float(os.getenv("ADV_STRAT_MAX_UP", "1.35"))
+ADV_STRAT_MIN_DOWN = float(os.getenv("ADV_STRAT_MIN_DOWN", "0.55"))
+ADV_RECOVER_NOTIFY_SEC = int(os.getenv("ADV_RECOVER_NOTIFY_SEC", "120"))
+ADV_REALIZED_RETRY = int(os.getenv("ADV_REALIZED_RETRY", "4"))
+ADV_REALIZED_SLEEP = float(os.getenv("ADV_REALIZED_SLEEP", "0.8"))
 
-if ENDGAME_PATCH_ON:
-    def _eg_int(v, default=0):
-        try:
-            return int(v)
-        except Exception:
-            return int(default)
 
-    def _eg_float(v, default=0.0):
-        try:
-            return float(v)
-        except Exception:
-            return float(default)
+def _adv_load_runtime():
+    return safe_read_json(ADVANCED_RUNTIME_FILE, {"by_strategy": {}, "ts": int(time.time())}) or {"by_strategy": {}, "ts": int(time.time())}
 
-    def _eg_save_runtime(self, reason: str = ""):
-        ts = int(time.time())
-        try:
-            self.state["runtime_saved_ts"] = ts
-            if reason:
-                self.state["runtime_save_reason"] = str(reason)
-        except Exception:
-            pass
-        try:
-            atomic_write_json(
-                data_path("runtime_state.json"),
-                {
-                    "consec_losses": _eg_int(getattr(self, "consec_losses", 0), 0),
-                    "daily_pnl": _eg_float(getattr(self, "daily_pnl", 0.0), 0.0),
-                    "trading_enabled": bool(getattr(self, "trading_enabled", True)),
-                    "mode": str(getattr(self, "mode", MODE_DEFAULT)),
-                    "allow_long": bool(getattr(self, "allow_long", ALLOW_LONG_DEFAULT)),
-                    "allow_short": bool(getattr(self, "allow_short", ALLOW_SHORT_DEFAULT)),
-                    "auto_symbol": bool(getattr(self, "auto_symbol", AUTO_SYMBOL_DEFAULT)),
-                    "fixed_symbol": str(getattr(self, "fixed_symbol", FIXED_SYMBOL_DEFAULT)),
-                    "auto_discovery": bool(getattr(self, "auto_discovery", AUTO_DISCOVERY_DEFAULT)),
-                    "diversify": bool(getattr(self, "diversify", DIVERSIFY_DEFAULT)),
-                    "max_positions": _eg_int(getattr(self, "max_positions", MAX_POSITIONS_DEFAULT), 1),
-                    "symbols": list(getattr(self, "symbols", SYMBOLS_ENV) or []),
-                    "tune": dict(getattr(self, "tune", {}) or {}),
-                    "ai_growth": bool(getattr(self, "ai_growth", AI_GROWTH_DEFAULT)),
-                    "avoid_low_rsi": bool(getattr(self, "state", {}).get("avoid_low_rsi", False)),
-                    "last_skip_reason": str(getattr(self, "state", {}).get("last_skip_reason", "") or ""),
-                    "runtime_save_reason": str(reason or getattr(self, "state", {}).get("runtime_save_reason", "") or ""),
-                    "ts": ts,
-                },
-            )
-            atomic_write_json(data_path("daily_pnl.json"), {"pnl": _eg_float(getattr(self, "daily_pnl", 0.0), 0.0), "ts": ts})
-        except Exception:
-            pass
 
-    def _eg_infer_partial_pnl(pos: dict):
-        try:
-            if not bool(pos.get("tp1_done")):
-                return 0.0
-            if pos.get("realized_pnl_partial") is not None:
-                return _eg_float(pos.get("realized_pnl_partial"), 0.0)
-            entry = _eg_float(pos.get("entry_price"), 0.0)
-            tp1 = pos.get("tp1_price")
-            if entry <= 0 or tp1 is None:
-                return 0.0
-            tp1 = _eg_float(tp1, 0.0)
-            frac = float(PARTIAL_TP_PCT) if 'PARTIAL_TP_PCT' in globals() else 0.0
-            if frac <= 0:
-                return 0.0
-            total_notional = _eg_float(pos.get("last_order_usdt"), 0.0) * _eg_float(pos.get("last_lev"), 0.0)
-            if total_notional <= 0:
-                return 0.0
-            if str(pos.get("side")) == "LONG":
-                pnl_pct = (tp1 - entry) / entry if entry > 0 else 0.0
-            else:
-                pnl_pct = (entry - tp1) / entry if entry > 0 else 0.0
-            return total_notional * frac * pnl_pct
-        except Exception:
-            return 0.0
+def _adv_save_runtime(st):
+    st["ts"] = int(time.time())
+    atomic_write_json(ADVANCED_RUNTIME_FILE, st)
 
-    _orig_init_endgame = getattr(Trader, "__init__", None)
-    if _orig_init_endgame:
-        def _init_endgame(self, state=None):
-            _orig_init_endgame(self, state)
-            try:
-                self.state.setdefault("last_skip_reason", "")
-                self.state.setdefault("runtime_saved_ts", 0)
-                self.state.setdefault("runtime_save_reason", "")
-            except Exception:
-                pass
-            try:
-                persisted = safe_read_json(data_path("runtime_state.json"), {}) or {}
-                if "last_skip_reason" in persisted:
-                    self.state["last_skip_reason"] = str(persisted.get("last_skip_reason") or "")
-                if "ts" in persisted:
-                    self.state["runtime_saved_ts"] = _eg_int(persisted.get("ts"), 0)
-                if "runtime_save_reason" in persisted:
-                    self.state["runtime_save_reason"] = str(persisted.get("runtime_save_reason") or "")
-            except Exception:
-                pass
-            try:
-                for p in getattr(self, "positions", []):
-                    p.setdefault("realized_pnl_partial", None)
-                    p.setdefault("realized_qty", 0.0)
-                    p.setdefault("remaining_qty_est", 1.0)
-            except Exception:
-                pass
-            try:
-                _eg_save_runtime(self, "init")
-            except Exception:
-                pass
-        Trader.__init__ = _init_endgame
 
-    _orig_enter_endgame = getattr(Trader, "_enter", None)
-    if _orig_enter_endgame:
-        def _enter_endgame(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float, *args, **kwargs):
-            out = _orig_enter_endgame(self, symbol, side, price, reason, sl, tp, *args, **kwargs)
-            try:
-                if getattr(self, "positions", None):
-                    p = self.positions[-1]
-                    if p.get("symbol") == symbol and p.get("side") == side:
-                        p.setdefault("realized_pnl_partial", None)
-                        p.setdefault("realized_qty", 0.0)
-                        p.setdefault("remaining_qty_est", 1.0)
-            except Exception:
-                pass
-            try:
-                _eg_save_runtime(self, f"enter:{symbol}")
-            except Exception:
-                pass
-            return out
-        Trader._enter = _enter_endgame
+class _AdvancedStrategyTuner:
+    def __init__(self):
+        self.st = _adv_load_runtime()
 
-    _orig_exit_endgame = getattr(Trader, "_exit_position", None)
-    if _orig_exit_endgame:
-        def _exit_endgame(self, idx: int, why: str, force=False):
-            if idx < 0 or idx >= len(getattr(self, "positions", [])):
-                return _orig_exit_endgame(self, idx, why, force=force)
+    def _bucket(self, strategy: str):
+        strategy = str(strategy or "unknown")
+        return (self.st.setdefault("by_strategy", {})).setdefault(strategy, {
+            "pnl_hist": [],
+            "disabled_until": 0,
+            "score_adj": 0,
+            "usdt_mult": 1.0,
+            "last_pnl": 0.0,
+            "updated_at": int(time.time()),
+        })
 
-            pos = self.positions[idx]
-            symbol = pos.get("symbol")
-            side = pos.get("side")
+    def _recalc(self, strategy: str):
+        b = self._bucket(strategy)
+        hist = [float(x) for x in (b.get("pnl_hist") or [])[-ADV_STRAT_WINDOW:]]
+        b["pnl_hist"] = hist
+        wins = sum(1 for x in hist if x > 0)
+        losses = sum(1 for x in hist if x <= 0)
+        total = len(hist)
+        wr = (wins / total) if total else 0.0
+        avg = (sum(hist) / total) if total else 0.0
+        avg_abs = (sum(abs(x) for x in hist) / total) if total else 0.0
 
-            try:
-                price = get_price(symbol)
-            except Exception as e:
-                if not force:
-                    self.err_throttled(f"❌ exit price 실패: {symbol} {e}")
-                    return
-                price = _eg_float(pos.get("entry_price"), 0.0)
+        score_adj = 0
+        usdt_mult = 1.0
+        now = int(time.time())
 
-            qty_before = 0.0
-            if not DRY_RUN:
-                try:
-                    qty_before = float(get_position_size(symbol) or 0.0)
-                    if qty_before > 0:
-                        self._close_qty(symbol, side, qty_before)
-                except Exception as e:
-                    self.err_throttled(f"❌ 실청산 실패: {symbol} {e}")
+        if total >= ADV_STRAT_MIN_TRADES:
+            if wr < ADV_STRAT_DISABLE_BELOW and avg <= 0:
+                b["disabled_until"] = max(int(b.get("disabled_until", 0) or 0), now + ADV_STRAT_DISABLE_FOR_MIN * 60)
+            edge = 0.0
+            if avg_abs > 0:
+                edge = max(-1.0, min(1.0, avg / avg_abs))
+            score_adj = int(round(-3 * edge))
+            usdt_mult = 1.0 + (0.35 * edge)
+            if wr >= 0.62 and avg > 0:
+                score_adj -= 1
+                usdt_mult += 0.10
+            if wr <= 0.45 and avg < 0:
+                score_adj += 2
+                usdt_mult -= 0.15
 
-            entry_price = _eg_float(pos.get("entry_price"), 0.0)
-            total_notional = _eg_float(pos.get("last_order_usdt"), 0.0) * _eg_float(pos.get("last_lev"), 0.0)
-            remaining_frac = _eg_float(pos.get("remaining_qty_est"), 1.0)
-            if remaining_frac <= 0 or remaining_frac > 1:
-                remaining_frac = (1.0 - float(PARTIAL_TP_PCT)) if bool(pos.get("tp1_done")) else 1.0
-                if remaining_frac <= 0 or remaining_frac > 1:
-                    remaining_frac = 1.0
-            remaining_notional = total_notional * remaining_frac
+        b["score_adj"] = int(max(-4, min(6, score_adj)))
+        b["usdt_mult"] = float(max(ADV_STRAT_MIN_DOWN, min(ADV_STRAT_MAX_UP, usdt_mult)))
+        b["wins"] = wins
+        b["losses"] = losses
+        b["trades"] = total
+        b["winrate"] = round(wr * 100.0, 2)
+        b["avg_pnl"] = round(avg, 4)
+        b["updated_at"] = now
+        return b
 
-            pnl_real = None
-            try:
-                pnl_real = _get_realized_pnl_usdt(symbol, float(pos.get("entry_ts") or 0))
-            except Exception:
-                pnl_real = None
+    def record(self, strategy: str, pnl_usdt: float):
+        strategy = str(strategy or "unknown")
+        b = self._bucket(strategy)
+        hist = b.get("pnl_hist") or []
+        hist.append(float(pnl_usdt))
+        b["pnl_hist"] = hist[-ADV_STRAT_WINDOW:]
+        b["last_pnl"] = float(pnl_usdt)
+        self._recalc(strategy)
+        _adv_save_runtime(self.st)
 
-            partial_pnl = _eg_infer_partial_pnl(pos)
-            remaining_est = estimate_pnl_usdt(side, entry_price, price, remaining_notional)
+    def allow(self, strategy: str):
+        strategy = str(strategy or "unknown")
+        b = self._recalc(strategy)
+        _adv_save_runtime(self.st)
+        until = int(b.get("disabled_until", 0) or 0)
+        if until > int(time.time()):
+            return False, f"ADV_BLOCK: {strategy} disabled until {until}"
+        return True, "ADV_OK"
 
-            if pnl_real is not None:
-                pnl_final = float(pnl_real)
-                self.state["last_pnl_source"] = "REALIZED_TOTAL"
-            else:
-                pnl_final = float(partial_pnl + remaining_est)
-                self.state["last_pnl_source"] = "PARTIAL+ESTIMATED" if partial_pnl else "ESTIMATED"
+    def score_adj(self, strategy: str) -> int:
+        return int(self._recalc(strategy).get("score_adj", 0) or 0)
 
-            self.day_profit += pnl_final
-            try:
-                self.daily_pnl = float(getattr(self, "daily_pnl", 0.0) or 0.0) + float(pnl_final)
-            except Exception:
-                self.daily_pnl = float(pnl_final)
-            _ai_record_pnl(pnl_final)
+    def usdt_mult(self, strategy: str) -> float:
+        return float(self._recalc(strategy).get("usdt_mult", 1.0) or 1.0)
 
-            try:
-                if USE_STRATEGY_PERF and self._perf is not None:
-                    self._perf.record_trade(str(pos.get("strategy") or ""), float(pnl_final))
-            except Exception:
-                pass
-            try:
-                if (not USE_STRATEGY_PERF or self._perf is None) and self._sg is not None:
-                    self._sg.record(str(pos.get("strategy") or ""), float(pnl_final))
-            except Exception:
-                pass
+    def summary(self):
+        out = {}
+        for k in sorted((self.st.get("by_strategy") or {}).keys()):
+            b = self._recalc(k)
+            out[k] = {
+                "trades": int(b.get("trades", 0) or 0),
+                "winrate": float(b.get("winrate", 0.0) or 0.0),
+                "avg_pnl": float(b.get("avg_pnl", 0.0) or 0.0),
+                "score_adj": int(b.get("score_adj", 0) or 0),
+                "usdt_mult": float(b.get("usdt_mult", 1.0) or 1.0),
+                "disabled_until": int(b.get("disabled_until", 0) or 0),
+            }
+        _adv_save_runtime(self.st)
+        return out
 
-            self._trade_count_total += 1
-            self._recent_results.append(float(pnl_final))
-            if len(self._recent_results) > 30:
-                self._recent_results = self._recent_results[-30:]
 
-            if pnl_final >= 0:
-                self.win += 1
-                self.consec_losses = 0
-            else:
-                self.loss += 1
-                self.consec_losses += 1
-
-            self.notify(f"✅ EXIT {symbol} {side} ({why}) price={price:.6f} pnl≈{pnl_final:.2f} day≈{self.day_profit:.2f} (W{self.win}/L{self.loss})")
-            _log_event(
-                "exit",
-                symbol=symbol,
-                side=side,
-                why=why,
-                exit_price=price,
-                entry_price=entry_price,
-                pnl=float(pnl_final),
-                pnl_source=self.state.get("last_pnl_source"),
-                partial_pnl=float(partial_pnl),
-                remaining_frac=float(remaining_frac),
-                qty_before=float(qty_before),
-            )
-            self.positions.pop(idx)
-            self._maybe_ai_grow()
-            try:
-                _eg_save_runtime(self, f"exit:{symbol}")
-            except Exception:
-                pass
-        Trader._exit_position = _exit_endgame
-
-    _orig_manage_endgame = getattr(Trader, "_manage_one", None)
-    if _orig_manage_endgame:
-        def _manage_one_endgame(self, idx: int):
-            before_tp1 = None
-            sym = None
-            if 0 <= idx < len(getattr(self, "positions", [])):
-                p = self.positions[idx]
-                before_tp1 = bool(p.get("tp1_done"))
-                sym = p.get("symbol")
-            out = _orig_manage_endgame(self, idx)
-            try:
-                if 0 <= idx < len(getattr(self, "positions", [])):
-                    p = self.positions[idx]
-                    p.setdefault("realized_pnl_partial", None)
-                    p.setdefault("realized_qty", 0.0)
-                    p.setdefault("remaining_qty_est", 1.0)
-                    if (before_tp1 is False) and bool(p.get("tp1_done")):
-                        inferred = _eg_infer_partial_pnl(p)
-                        p["realized_pnl_partial"] = float(inferred)
-                        p["realized_qty"] = float(PARTIAL_TP_PCT)
-                        rem = 1.0 - float(PARTIAL_TP_PCT)
-                        p["remaining_qty_est"] = rem if rem > 0 else 0.0
-                        _log_event("partial_tp", symbol=sym, partial_pnl=float(inferred), remaining_frac=float(p["remaining_qty_est"]))
-                        _eg_save_runtime(self, f"partial:{sym}")
-            except Exception:
-                pass
-            return out
-        Trader._manage_one = _manage_one_endgame
-
-    _orig_manual_enter_endgame = getattr(Trader, "manual_enter", None)
-    if _orig_manual_enter_endgame:
-        def _manual_enter_endgame(self, side: str):
-            try:
-                self._reset_day()
-                if len(self.positions) >= self.max_positions:
-                    self.notify("⚠️ 최대 포지션 수 도달")
-                    return
-                symbol = self.fixed_symbol
-                price = get_price(symbol)
-
-                try:
-                    scored = self._score_symbol(symbol, price)
-                except Exception:
-                    scored = {"ok": True}
-                if isinstance(scored, dict) and not bool(scored.get("ok", True)):
-                    block = str(scored.get("reason") or "entry_blocked")
-                    self.state["last_skip_reason"] = block
-                    self.notify(f"⛔ 수동진입 차단: {block}")
-                    _eg_save_runtime(self, f"manual_block:{symbol}")
-                    return
-
-                mp = self._mp()
-                ok, reason, score, sl, tp, a = compute_signal_and_exits(
-                    symbol, side, price, mp, avoid_low_rsi=bool(self.state.get("avoid_low_rsi", False))
-                )
-                if not ok:
-                    self.state["last_skip_reason"] = str(reason or "signal_not_ok")
-                    self.notify(f"⛔ 수동진입 차단: {reason}")
-                    _eg_save_runtime(self, f"manual_signal_block:{symbol}")
-                    return
-                self._enter(symbol, side, price, reason + "- manual=True\n", sl, tp)
-                _eg_save_runtime(self, f"manual_enter:{symbol}")
-            except Exception as e:
-                self.err_throttled(f"❌ manual enter 실패: {e}")
-        Trader.manual_enter = _manual_enter_endgame
-
-    _orig_status_endgame = getattr(Trader, "status_text", None)
-    if _orig_status_endgame:
-        def _status_endgame(self):
-            try:
-                base = _orig_status_endgame(self)
-                lines = str(base).split("\n") if base else []
-            except Exception:
-                lines = []
-            now_ts = int(time.time())
-            cooldown_left = max(0, int(getattr(self, "_cooldown_until", 0) - time.time()))
-            saved_ts = _eg_int(getattr(self, "state", {}).get("runtime_saved_ts", 0), 0)
-            saved_ago = (now_ts - saved_ts) if saved_ts > 0 else -1
-            lines.append(f"💾 runtime_saved_ts={saved_ts} | saved_ago={saved_ago}s | save_reason={self.state.get('runtime_save_reason', '-')}")
-            lines.append(f"🧯 kill_switch_cooldown={bool(self._ks.in_cooldown())} | cooldown_left={cooldown_left}s | cb_err_count={_eg_int(getattr(self, '_cb_err_count', 0), 0)}")
-            lines.append(f"📉 daily_pnl={_eg_float(getattr(self, 'daily_pnl', 0.0), 0.0):.2f} | consec_losses={_eg_int(getattr(self, 'consec_losses', 0), 0)} | last_skip={self.state.get('last_skip_reason', '-')}")
-            try:
-                iw = getattr(self, "_inst_weights", {}) or {}
-                if iw:
-                    preview = ", ".join([f"{k}:{float(v):.2f}" for k, v in list(iw.items())[:5]])
-                    lines.append(f"🏦 inst_weights={preview}")
-            except Exception:
-                pass
-            try:
-                recent = getattr(self, "_recent_results", []) or []
-                if recent:
-                    tail = ", ".join([f"{float(x):.2f}" for x in recent[-5:]])
-                    lines.append(f"🧪 recent_pnl={tail}")
-            except Exception:
-                pass
-            return "\n".join(lines)
-        Trader.status_text = _status_endgame
-
-    _orig_tick_endgame2 = getattr(Trader, "tick", None)
-    if _orig_tick_endgame2:
-        def _tick_endgame2(self):
-            out = _orig_tick_endgame2(self)
-            try:
-                if time.time() < getattr(self, "_cooldown_until", 0):
-                    self.state["last_skip_reason"] = "cooldown"
-                elif not bool(getattr(self, "trading_enabled", True)):
-                    self.state["last_skip_reason"] = "trading_off"
-                elif getattr(self, "positions", None):
-                    self.state["last_skip_reason"] = "holding_position"
-            except Exception:
-                pass
-            try:
-                _eg_save_runtime(self, "tick")
-            except Exception:
-                pass
-            return out
-        Trader.tick = _tick_endgame2
-
+def _adv_real_positions_map():
     try:
-        Trader._save_runtime = _eg_save_runtime
+        plist = get_positions_all()
+        out = {}
+        for p in plist:
+            size = float(p.get("size") or 0)
+            if size <= 0:
+                continue
+            sym = (p.get("symbol") or "").upper()
+            side = "LONG" if (p.get("side") == "Buy") else "SHORT"
+            out[(sym, side)] = {
+                "symbol": sym,
+                "side": side,
+                "size": size,
+                "entry_price": float(p.get("avgPrice") or p.get("entryPrice") or 0),
+            }
+        return out
+    except Exception:
+        return {}
+
+
+def _adv_sum_closed_pnl(symbol: str, entry_ts: float, retries: int = None):
+    if DRY_RUN or (not USE_REALIZED_PNL):
+        return None
+    retries = int(retries or ADV_REALIZED_RETRY)
+    entry_ms = int(float(entry_ts or 0) * 1000) if entry_ts else 0
+    for attempt in range(max(1, retries)):
+        try:
+            end_ms = int(time.time() * 1000)
+            lookback_ms = int(max(60, REALIZED_PNL_LOOKBACK_MIN) * 60 * 1000)
+            start_ms = max(0, end_ms - lookback_ms)
+            if entry_ms:
+                start_ms = max(start_ms, entry_ms - 10 * 60 * 1000)
+            params = {
+                "category": CATEGORY,
+                "symbol": symbol,
+                "limit": "100",
+                "startTime": str(start_ms),
+                "endTime": str(end_ms),
+            }
+            j = http.request("GET", "/v5/position/closed-pnl", params, auth=True)
+            lst = (j.get("result") or {}).get("list") or []
+            total = 0.0
+            matched = 0
+            for r in lst:
+                t_ms = 0
+                for k in ("updatedTime", "createdTime", "closeTime", "execTime"):
+                    v = r.get(k)
+                    if v is None:
+                        continue
+                    try:
+                        vv = float(v)
+                        t_ms = int(vv if vv > 10_000_000_000 else vv * 1000)
+                        break
+                    except Exception:
+                        continue
+                if entry_ms and t_ms and t_ms < entry_ms:
+                    continue
+                try:
+                    pnl = r.get("closedPnl")
+                    if pnl is None:
+                        pnl = r.get("pnl")
+                    if pnl is None:
+                        continue
+                    total += float(pnl)
+                    matched += 1
+                except Exception:
+                    continue
+            if matched > 0:
+                return float(total)
+        except Exception:
+            pass
+        if attempt < retries - 1:
+            time.sleep(ADV_REALIZED_SLEEP)
+    return None
+
+
+def _adv_estimate_trade_pnl(pos: dict, exit_price: float):
+    entry_price = float(pos.get("entry_price") or 0)
+    side = str(pos.get("side") or "LONG")
+    notional = float(pos.get("last_order_usdt") or 0) * float(pos.get("last_lev") or 0)
+    return estimate_pnl_usdt(side, entry_price, float(exit_price or 0), notional)
+
+
+def _adv_sync_runtime(self):
+    try:
+        atomic_write_json(
+            data_path("runtime_state.json"),
+            {
+                "consec_losses": int(getattr(self, "consec_losses", 0) or 0),
+                "daily_pnl": float(getattr(self, "daily_pnl", 0.0) or 0.0),
+                "trading_enabled": bool(getattr(self, "trading_enabled", True)),
+                "mode": str(getattr(self, "mode", MODE_DEFAULT)),
+                "allow_long": bool(getattr(self, "allow_long", ALLOW_LONG_DEFAULT)),
+                "allow_short": bool(getattr(self, "allow_short", ALLOW_SHORT_DEFAULT)),
+                "auto_symbol": bool(getattr(self, "auto_symbol", AUTO_SYMBOL_DEFAULT)),
+                "fixed_symbol": str(getattr(self, "fixed_symbol", FIXED_SYMBOL_DEFAULT)),
+                "auto_discovery": bool(getattr(self, "auto_discovery", AUTO_DISCOVERY_DEFAULT)),
+                "diversify": bool(getattr(self, "diversify", DIVERSIFY_DEFAULT)),
+                "max_positions": int(getattr(self, "max_positions", MAX_POSITIONS_DEFAULT) or 1),
+                "symbols": list(getattr(self, "symbols", SYMBOLS_ENV) or []),
+                "tune": dict(getattr(self, "tune", {}) or {}),
+                "ai_growth": bool(getattr(self, "ai_growth", AI_GROWTH_DEFAULT)),
+                "avoid_low_rsi": bool(self.state.get("avoid_low_rsi", False)),
+                "ts": int(time.time()),
+            },
+        )
+        atomic_write_json(data_path("daily_pnl.json"), {"pnl": float(getattr(self, "daily_pnl", 0.0) or 0.0), "ts": int(time.time())})
     except Exception:
         pass
+
+
+def _adv_import_real_position(self, rp: dict):
+    symbol = rp["symbol"]
+    side = rp["side"]
+    try:
+        price = get_price(symbol)
+    except Exception:
+        price = float(rp.get("entry_price") or 0)
+    mp = self._mp()
+    ok, reason, score, sl, tp, a = compute_signal_and_exits(
+        symbol, side, price, mp, avoid_low_rsi=bool(self.state.get("avoid_low_rsi", False))
+    )
+    if sl is None or tp is None:
+        a = a if (a is not None and a > 0) else price * 0.01
+        stop_dist = a * mp["stop_atr"]
+        tp_dist = stop_dist * mp["tp_r"]
+        if side == "LONG":
+            sl = price - stop_dist
+            tp = price + tp_dist
+        else:
+            sl = price + stop_dist
+            tp = price - tp_dist
+    tp1_price = None
+    if PARTIAL_TP_ON:
+        if side == "LONG":
+            tp1_price = price + (tp - price) * TP1_FRACTION
+        else:
+            tp1_price = price - (price - tp) * TP1_FRACTION
+    self.positions.append({
+        "symbol": symbol,
+        "side": side,
+        "entry_price": float(rp.get("entry_price") or price or 0),
+        "entry_ts": time.time(),
+        "stop_price": sl,
+        "tp_price": tp,
+        "trail_price": None,
+        "tp1_price": tp1_price,
+        "tp1_done": False,
+        "last_order_usdt": None,
+        "last_lev": None,
+        "strategy": "recovered",
+        "entry_score": 0.0,
+        "imported_from_exchange": True,
+        "last_known_qty": float(rp.get("size") or 0.0),
+        "realized_pnl_partial": 0.0,
+        "realized_qty": 0.0,
+        "closed_pnl_booked": 0.0,
+        "entry_price_real": float(rp.get("entry_price") or price or 0),
+    })
+
+
+def _adv_reconcile(self, notify: bool = False):
+    if DRY_RUN:
+        return
+    real_map = _adv_real_positions_map()
+    self.state["real_positions"] = list(real_map.values())[:8]
+    internal_map = {((p.get("symbol") or "").upper(), p.get("side")): p for p in (self.positions or [])}
+    imported = 0
+    removed = 0
+
+    for key, rp in real_map.items():
+        pos = internal_map.get(key)
+        if pos is None:
+            _adv_import_real_position(self, rp)
+            imported += 1
+            continue
+        pos["last_known_qty"] = float(rp.get("size") or 0.0)
+        if float(rp.get("entry_price") or 0) > 0:
+            pos["entry_price_real"] = float(rp.get("entry_price") or 0)
+
+    for idx in range(len(self.positions) - 1, -1, -1):
+        pos = self.positions[idx]
+        key = ((pos.get("symbol") or "").upper(), pos.get("side"))
+        if key in real_map:
+            continue
+        # internal ghost: exchange says flat
+        pos["ghost_closed"] = True
+        pos["ghost_closed_ts"] = int(time.time())
+        if pos.get("imported_from_exchange") or pos.get("tp1_done") or pos.get("last_known_qty"):
+            # cleanup aggressively for stale/recovered positions
+            self.positions.pop(idx)
+            removed += 1
+
+    if notify:
+        if imported:
+            self.notify_throttled(f"🔄 실포지션 {imported}개 자동 복구 완료", ADV_RECOVER_NOTIFY_SEC)
+        if removed:
+            self.notify_throttled(f"🧹 내부 ghost 포지션 {removed}개 정리 완료", ADV_RECOVER_NOTIFY_SEC)
+
+
+if FINAL10_ON:
+    _ultra_prev_init = Trader.__init__
+    def _ultra_init(self, state=None):
+        _ultra_prev_init(self, state)
+        self._adv_tuner = _AdvancedStrategyTuner()
+        self._last_skip_reason = ""
+        self._last_runtime_save_ts = 0
+        self._last_recover_ts = 0
+        self._doctor_last = {}
+    Trader.__init__ = _ultra_init
+
+    _ultra_prev_score = Trader._score_symbol
+    def _ultra_score_symbol(self, symbol: str, price: float):
+        info = _ultra_prev_score(self, symbol, price)
+        if not isinstance(info, dict):
+            return info
+        if not info.get("ok"):
+            self._last_skip_reason = str(info.get("reason") or "not_ok")
+            return info
+        strategy = str(info.get("strategy") or "unknown")
+        try:
+            ok_adv, msg_adv = self._adv_tuner.allow(strategy)
+            if not ok_adv:
+                self._last_skip_reason = msg_adv
+                return {"ok": False, "reason": msg_adv, "strategy": strategy}
+            adj = int(self._adv_tuner.score_adj(strategy))
+            mult = float(self._adv_tuner.usdt_mult(strategy))
+            info["score_raw"] = float(info.get("score", 0) or 0)
+            info["score"] = float(info.get("score", 0) or 0) + adj
+            info["strategy_weight_mult"] = mult
+            if adj:
+                info["reason"] = f"{info.get('reason','')}\nADV_STRAT score_adj={adj} mult={mult:.2f}".strip()
+        except Exception as e:
+            info["reason"] = f"{info.get('reason','')}\nADV_STRAT_ERR={e}".strip()
+        return info
+    Trader._score_symbol = _ultra_score_symbol
+
+    _ultra_prev_enter = Trader._enter
+    def _ultra_enter(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float, strategy: str = "", score: float = 0.0, atr: float = 0.0, *args, **kwargs):
+        strategy = str(strategy or "unknown")
+        mult = 1.0
+        try:
+            mult = float(self._adv_tuner.usdt_mult(strategy))
+        except Exception:
+            mult = 1.0
+        mode_tune = self.tune.get(self.mode, {}).copy()
+        orig_usdt = mode_tune.get("order_usdt")
+        if orig_usdt is not None:
+            self.tune[self.mode]["order_usdt"] = float(orig_usdt) * float(mult)
+        try:
+            rv = _ultra_prev_enter(self, symbol, side, price, reason, sl, tp, strategy, score, atr, *args, **kwargs)
+            if self.positions:
+                pos = self.positions[-1]
+                if (pos.get("symbol") == symbol) and (pos.get("side") == side):
+                    pos.setdefault("strategy", strategy)
+                    pos["strategy_weight_mult"] = float(mult)
+                    pos["realized_pnl_partial"] = float(pos.get("realized_pnl_partial") or 0.0)
+                    pos["realized_qty"] = float(pos.get("realized_qty") or 0.0)
+                    pos["closed_pnl_booked"] = float(pos.get("closed_pnl_booked") or 0.0)
+                    pos["last_known_qty"] = float(pos.get("last_known_qty") or 0.0)
+            _adv_sync_runtime(self)
+            return rv
+        finally:
+            if orig_usdt is not None:
+                self.tune[self.mode]["order_usdt"] = orig_usdt
+    Trader._enter = _ultra_enter
+
+    _ultra_prev_manage = Trader._manage_one
+    def _ultra_manage_one(self, idx: int):
+        before_tp1 = False
+        before_qty = None
+        pos = None
+        if 0 <= idx < len(self.positions):
+            pos = self.positions[idx]
+            before_tp1 = bool(pos.get("tp1_done"))
+            before_qty = float(pos.get("last_known_qty") or 0.0)
+        rv = _ultra_prev_manage(self, idx)
+        if 0 <= idx < len(self.positions):
+            pos = self.positions[idx]
+            if (not before_tp1) and bool(pos.get("tp1_done")):
+                try:
+                    total_real = _adv_sum_closed_pnl(pos["symbol"], float(pos.get("entry_ts") or 0), retries=2)
+                    if total_real is not None:
+                        pos["realized_pnl_partial"] = float(total_real)
+                        pos["closed_pnl_booked"] = float(total_real)
+                    if not DRY_RUN:
+                        real_map = _adv_real_positions_map()
+                        rp = real_map.get(((pos.get("symbol") or "").upper(), pos.get("side")))
+                        if rp:
+                            now_qty = float(rp.get("size") or 0.0)
+                            pos["realized_qty"] = max(0.0, float(before_qty or pos.get("last_known_qty") or 0.0) - now_qty)
+                            pos["last_known_qty"] = now_qty
+                except Exception:
+                    pass
+                _adv_sync_runtime(self)
+        return rv
+    Trader._manage_one = _ultra_manage_one
+
+    def _ultra_exit_position(self, idx: int, why: str, force=False):
+        if idx < 0 or idx >= len(self.positions):
+            return
+        pos = self.positions[idx]
+        symbol = pos["symbol"]
+        side = pos["side"]
+
+        try:
+            price = get_price(symbol)
+        except Exception as e:
+            if not force:
+                self.err_throttled(f"❌ exit price 실패: {symbol} {e}")
+                return
+            price = pos.get("entry_price") or 0
+
+        realized_before = None
+        try:
+            realized_before = _adv_sum_closed_pnl(symbol, float(pos.get("entry_ts") or 0), retries=1)
+        except Exception:
+            realized_before = None
+
+        if not DRY_RUN:
+            try:
+                qty = get_position_size(symbol)
+                if qty > 0:
+                    self._close_qty(symbol, side, qty)
+            except Exception as e:
+                self.err_throttled(f"❌ 실청산 실패: {symbol} {e}")
+
+        entry_price = float(pos.get("entry_price") or 0)
+        pnl_real_total = _adv_sum_closed_pnl(symbol, float(pos.get("entry_ts") or 0), retries=ADV_REALIZED_RETRY)
+        pnl_est = _adv_estimate_trade_pnl(pos, price)
+        if pnl_real_total is not None:
+            pnl_final = float(pnl_real_total)
+            self.state["last_pnl_source"] = "REALIZED_SUM"
+        elif realized_before is not None:
+            pnl_final = float(realized_before)
+            self.state["last_pnl_source"] = "REALIZED_BEFORE"
+        else:
+            pnl_final = float(pnl_est)
+            self.state["last_pnl_source"] = "ESTIMATED"
+
+        self.day_profit += pnl_final
+        _ai_record_pnl(pnl_final)
+
+        strategy = str(pos.get("strategy") or "")
+        try:
+            if USE_STRATEGY_PERF and self._perf is not None:
+                self._perf.record_trade(strategy, float(pnl_final))
+        except Exception:
+            pass
+        try:
+            if (not USE_STRATEGY_PERF or self._perf is None) and self._sg is not None:
+                self._sg.record(strategy, float(pnl_final))
+        except Exception:
+            pass
+        try:
+            self._adv_tuner.record(strategy, float(pnl_final))
+        except Exception:
+            pass
+
+        self._trade_count_total += 1
+        self._recent_results.append(pnl_final)
+        if len(self._recent_results) > 30:
+            self._recent_results = self._recent_results[-30:]
+
+        if pnl_final >= 0:
+            self.win += 1
+            self.consec_losses = 0
+        else:
+            self.loss += 1
+            self.consec_losses += 1
+
+        self.notify(f"✅ EXIT {symbol} {side} ({why}) price={price:.6f} pnl≈{pnl_final:.2f} day≈{self.day_profit:.2f} (W{self.win}/L{self.loss})")
+        _log_event(
+            "exit",
+            symbol=symbol,
+            side=side,
+            why=why,
+            exit_price=price,
+            entry_price=entry_price,
+            pnl=float(pnl_final),
+            pnl_source=self.state.get("last_pnl_source"),
+            strategy=strategy,
+            realized_partial=float(pos.get("realized_pnl_partial") or 0.0),
+        )
+        self.positions.pop(idx)
+        _adv_sync_runtime(self)
+        self._maybe_ai_grow()
+    Trader._exit_position = _ultra_exit_position
+
+    _ultra_prev_handle = Trader.handle_command
+    def _ultra_handle_command(self, text: str):
+        cmd = (text or "").strip()
+        low = cmd.lower()
+        if low in ("/sync", "/recover"):
+            _adv_reconcile(self, notify=True)
+            _adv_sync_runtime(self)
+            self.notify("✅ recover/sync 완료")
+            return
+        if low == "/perf":
+            perf_lines = ["📊 Strategy Perf"]
+            try:
+                summary = self._adv_tuner.summary()
+                if not summary:
+                    perf_lines.append("- 데이터 없음")
+                else:
+                    for k, v in list(summary.items())[:12]:
+                        perf_lines.append(f"- {k}: WR {v['winrate']:.1f}% | n={v['trades']} | avg={v['avg_pnl']:.2f} | scoreAdj={v['score_adj']} | x{v['usdt_mult']:.2f}")
+            except Exception as e:
+                perf_lines.append(f"- error: {e}")
+            self.notify("\n".join(perf_lines))
+            return
+        if low == "/weights":
+            lines = ["⚖️ Strategy Weights"]
+            try:
+                summary = self._adv_tuner.summary()
+                if summary:
+                    for k, v in list(summary.items())[:12]:
+                        lines.append(f"- {k}: order x{v['usdt_mult']:.2f}, scoreAdj {v['score_adj']}")
+                else:
+                    lines.append("- 데이터 없음")
+            except Exception as e:
+                lines.append(f"- error: {e}")
+            self.notify("\n".join(lines))
+            return
+        if low == "/doctor":
+            doc = {
+                "positions_internal": len(self.positions or []),
+                "positions_real": len(self.state.get("real_positions") or []),
+                "cb_err_count": int(getattr(self, "_cb_err_count", 0) or 0),
+                "cooldown_left": max(0, int(float(getattr(self, "_cooldown_until", 0) or 0) - time.time())),
+                "mode": self.mode,
+                "trading_enabled": bool(self.trading_enabled),
+                "last_skip_reason": str(getattr(self, "_last_skip_reason", "") or ""),
+            }
+            self._doctor_last = doc
+            self.notify("🩺 doctor\n" + "\n".join(f"- {k}: {v}" for k, v in doc.items()))
+            return
+        return _ultra_prev_handle(self, text)
+    Trader.handle_command = _ultra_handle_command
+
+    _ultra_prev_status = Trader.status_text
+    def _ultra_status_text(self):
+        base = _ultra_prev_status(self)
+        lines = [base]
+        cooldown_left = max(0, int(float(getattr(self, "_cooldown_until", 0) or 0) - time.time()))
+        lines.append(f"🛡️ cb_err_count={int(getattr(self, '_cb_err_count', 0) or 0)} | cooldown_left={cooldown_left}s")
+        lines.append(f"💾 runtime_saved_ts={int((safe_read_json(data_path('runtime_state.json'), {}) or {}).get('ts', 0) or 0)} | last_skip={getattr(self, '_last_skip_reason', '')}")
+        try:
+            summary = self._adv_tuner.summary()
+            if summary:
+                top = []
+                for k, v in list(summary.items())[:4]:
+                    top.append(f"{k}:WR{v['winrate']:.0f}% n{v['trades']} x{v['usdt_mult']:.2f}")
+                lines.append("🎯 strat=" + " | ".join(top))
+        except Exception:
+            pass
+        if isinstance(getattr(self, '_inst_weights', None), dict) and self._inst_weights:
+            try:
+                topw = sorted(self._inst_weights.items(), key=lambda x: x[1], reverse=True)[:4]
+                lines.append("🏦 inst=" + " | ".join(f"{k}:{v:.2f}" for k, v in topw))
+            except Exception:
+                pass
+        if self.state.get("real_positions"):
+            try:
+                lines.append("🔁 real=" + ", ".join(f"{p['symbol']}:{p['side']}:{float(p['size']):g}" for p in (self.state.get("real_positions") or [])[:4]))
+            except Exception:
+                pass
+        return "\n".join(lines)
+    Trader.status_text = _ultra_status_text
+
+    _ultra_prev_tick = Trader.tick
+    def _ultra_tick(self):
+        try:
+            _adv_reconcile(self, notify=False)
+        except Exception:
+            pass
+        rv = _ultra_prev_tick(self)
+        try:
+            _adv_sync_runtime(self)
+        except Exception:
+            pass
+        return rv
+    Trader.tick = _ultra_tick
+# ======================================================================
+# END ULTRA PATCH PACK v2
+# ======================================================================
