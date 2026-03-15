@@ -1,0 +1,17 @@
+# telegram_command_parser.py
+def parse_command_text(text: str):
+    cmd = (text or "").strip()
+    if not cmd:
+        return "", ""
+    parts = cmd.split()
+    c0 = ""
+    cmd_idx = -1
+    for i, p in enumerate(parts):
+        if p.startswith("/"):
+            c0 = p.lower()
+            cmd_idx = i
+            break
+    if not c0:
+        return "", ""
+    arg = " ".join(parts[cmd_idx + 1:]) if cmd_idx >= 0 else ""
+    return c0, arg
