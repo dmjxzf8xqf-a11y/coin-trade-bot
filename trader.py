@@ -2648,3 +2648,371 @@ if FINAL10_ON:
 # ======================================================================
 # END FINAL 10/10 PATCH
 # ======================================================================
+
+
+# ===================== ENDGAME PATCH (2026-03-15) =====================
+# Added by ChatGPT:
+# - immediate runtime persistence helper
+# - stronger status panel
+# - manual entry gate alignment
+# - safer realized/estimated pnl handling after partial TP
+# - lightweight persistence on key state changes
+
+try:
+    ENDGAME_PATCH_ON = True
+except Exception:
+    ENDGAME_PATCH_ON = True
+
+if ENDGAME_PATCH_ON:
+    def _eg_int(v, default=0):
+        try:
+            return int(v)
+        except Exception:
+            return int(default)
+
+    def _eg_float(v, default=0.0):
+        try:
+            return float(v)
+        except Exception:
+            return float(default)
+
+    def _eg_save_runtime(self, reason: str = ""):
+        ts = int(time.time())
+        try:
+            self.state["runtime_saved_ts"] = ts
+            if reason:
+                self.state["runtime_save_reason"] = str(reason)
+        except Exception:
+            pass
+        try:
+            atomic_write_json(
+                data_path("runtime_state.json"),
+                {
+                    "consec_losses": _eg_int(getattr(self, "consec_losses", 0), 0),
+                    "daily_pnl": _eg_float(getattr(self, "daily_pnl", 0.0), 0.0),
+                    "trading_enabled": bool(getattr(self, "trading_enabled", True)),
+                    "mode": str(getattr(self, "mode", MODE_DEFAULT)),
+                    "allow_long": bool(getattr(self, "allow_long", ALLOW_LONG_DEFAULT)),
+                    "allow_short": bool(getattr(self, "allow_short", ALLOW_SHORT_DEFAULT)),
+                    "auto_symbol": bool(getattr(self, "auto_symbol", AUTO_SYMBOL_DEFAULT)),
+                    "fixed_symbol": str(getattr(self, "fixed_symbol", FIXED_SYMBOL_DEFAULT)),
+                    "auto_discovery": bool(getattr(self, "auto_discovery", AUTO_DISCOVERY_DEFAULT)),
+                    "diversify": bool(getattr(self, "diversify", DIVERSIFY_DEFAULT)),
+                    "max_positions": _eg_int(getattr(self, "max_positions", MAX_POSITIONS_DEFAULT), 1),
+                    "symbols": list(getattr(self, "symbols", SYMBOLS_ENV) or []),
+                    "tune": dict(getattr(self, "tune", {}) or {}),
+                    "ai_growth": bool(getattr(self, "ai_growth", AI_GROWTH_DEFAULT)),
+                    "avoid_low_rsi": bool(getattr(self, "state", {}).get("avoid_low_rsi", False)),
+                    "last_skip_reason": str(getattr(self, "state", {}).get("last_skip_reason", "") or ""),
+                    "runtime_save_reason": str(reason or getattr(self, "state", {}).get("runtime_save_reason", "") or ""),
+                    "ts": ts,
+                },
+            )
+            atomic_write_json(data_path("daily_pnl.json"), {"pnl": _eg_float(getattr(self, "daily_pnl", 0.0), 0.0), "ts": ts})
+        except Exception:
+            pass
+
+    def _eg_infer_partial_pnl(pos: dict):
+        try:
+            if not bool(pos.get("tp1_done")):
+                return 0.0
+            if pos.get("realized_pnl_partial") is not None:
+                return _eg_float(pos.get("realized_pnl_partial"), 0.0)
+            entry = _eg_float(pos.get("entry_price"), 0.0)
+            tp1 = pos.get("tp1_price")
+            if entry <= 0 or tp1 is None:
+                return 0.0
+            tp1 = _eg_float(tp1, 0.0)
+            frac = float(PARTIAL_TP_PCT) if 'PARTIAL_TP_PCT' in globals() else 0.0
+            if frac <= 0:
+                return 0.0
+            total_notional = _eg_float(pos.get("last_order_usdt"), 0.0) * _eg_float(pos.get("last_lev"), 0.0)
+            if total_notional <= 0:
+                return 0.0
+            if str(pos.get("side")) == "LONG":
+                pnl_pct = (tp1 - entry) / entry if entry > 0 else 0.0
+            else:
+                pnl_pct = (entry - tp1) / entry if entry > 0 else 0.0
+            return total_notional * frac * pnl_pct
+        except Exception:
+            return 0.0
+
+    _orig_init_endgame = getattr(Trader, "__init__", None)
+    if _orig_init_endgame:
+        def _init_endgame(self, state=None):
+            _orig_init_endgame(self, state)
+            try:
+                self.state.setdefault("last_skip_reason", "")
+                self.state.setdefault("runtime_saved_ts", 0)
+                self.state.setdefault("runtime_save_reason", "")
+            except Exception:
+                pass
+            try:
+                persisted = safe_read_json(data_path("runtime_state.json"), {}) or {}
+                if "last_skip_reason" in persisted:
+                    self.state["last_skip_reason"] = str(persisted.get("last_skip_reason") or "")
+                if "ts" in persisted:
+                    self.state["runtime_saved_ts"] = _eg_int(persisted.get("ts"), 0)
+                if "runtime_save_reason" in persisted:
+                    self.state["runtime_save_reason"] = str(persisted.get("runtime_save_reason") or "")
+            except Exception:
+                pass
+            try:
+                for p in getattr(self, "positions", []):
+                    p.setdefault("realized_pnl_partial", None)
+                    p.setdefault("realized_qty", 0.0)
+                    p.setdefault("remaining_qty_est", 1.0)
+            except Exception:
+                pass
+            try:
+                _eg_save_runtime(self, "init")
+            except Exception:
+                pass
+        Trader.__init__ = _init_endgame
+
+    _orig_enter_endgame = getattr(Trader, "_enter", None)
+    if _orig_enter_endgame:
+        def _enter_endgame(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float, *args, **kwargs):
+            out = _orig_enter_endgame(self, symbol, side, price, reason, sl, tp, *args, **kwargs)
+            try:
+                if getattr(self, "positions", None):
+                    p = self.positions[-1]
+                    if p.get("symbol") == symbol and p.get("side") == side:
+                        p.setdefault("realized_pnl_partial", None)
+                        p.setdefault("realized_qty", 0.0)
+                        p.setdefault("remaining_qty_est", 1.0)
+            except Exception:
+                pass
+            try:
+                _eg_save_runtime(self, f"enter:{symbol}")
+            except Exception:
+                pass
+            return out
+        Trader._enter = _enter_endgame
+
+    _orig_exit_endgame = getattr(Trader, "_exit_position", None)
+    if _orig_exit_endgame:
+        def _exit_endgame(self, idx: int, why: str, force=False):
+            if idx < 0 or idx >= len(getattr(self, "positions", [])):
+                return _orig_exit_endgame(self, idx, why, force=force)
+
+            pos = self.positions[idx]
+            symbol = pos.get("symbol")
+            side = pos.get("side")
+
+            try:
+                price = get_price(symbol)
+            except Exception as e:
+                if not force:
+                    self.err_throttled(f"❌ exit price 실패: {symbol} {e}")
+                    return
+                price = _eg_float(pos.get("entry_price"), 0.0)
+
+            qty_before = 0.0
+            if not DRY_RUN:
+                try:
+                    qty_before = float(get_position_size(symbol) or 0.0)
+                    if qty_before > 0:
+                        self._close_qty(symbol, side, qty_before)
+                except Exception as e:
+                    self.err_throttled(f"❌ 실청산 실패: {symbol} {e}")
+
+            entry_price = _eg_float(pos.get("entry_price"), 0.0)
+            total_notional = _eg_float(pos.get("last_order_usdt"), 0.0) * _eg_float(pos.get("last_lev"), 0.0)
+            remaining_frac = _eg_float(pos.get("remaining_qty_est"), 1.0)
+            if remaining_frac <= 0 or remaining_frac > 1:
+                remaining_frac = (1.0 - float(PARTIAL_TP_PCT)) if bool(pos.get("tp1_done")) else 1.0
+                if remaining_frac <= 0 or remaining_frac > 1:
+                    remaining_frac = 1.0
+            remaining_notional = total_notional * remaining_frac
+
+            pnl_real = None
+            try:
+                pnl_real = _get_realized_pnl_usdt(symbol, float(pos.get("entry_ts") or 0))
+            except Exception:
+                pnl_real = None
+
+            partial_pnl = _eg_infer_partial_pnl(pos)
+            remaining_est = estimate_pnl_usdt(side, entry_price, price, remaining_notional)
+
+            if pnl_real is not None:
+                pnl_final = float(pnl_real)
+                self.state["last_pnl_source"] = "REALIZED_TOTAL"
+            else:
+                pnl_final = float(partial_pnl + remaining_est)
+                self.state["last_pnl_source"] = "PARTIAL+ESTIMATED" if partial_pnl else "ESTIMATED"
+
+            self.day_profit += pnl_final
+            try:
+                self.daily_pnl = float(getattr(self, "daily_pnl", 0.0) or 0.0) + float(pnl_final)
+            except Exception:
+                self.daily_pnl = float(pnl_final)
+            _ai_record_pnl(pnl_final)
+
+            try:
+                if USE_STRATEGY_PERF and self._perf is not None:
+                    self._perf.record_trade(str(pos.get("strategy") or ""), float(pnl_final))
+            except Exception:
+                pass
+            try:
+                if (not USE_STRATEGY_PERF or self._perf is None) and self._sg is not None:
+                    self._sg.record(str(pos.get("strategy") or ""), float(pnl_final))
+            except Exception:
+                pass
+
+            self._trade_count_total += 1
+            self._recent_results.append(float(pnl_final))
+            if len(self._recent_results) > 30:
+                self._recent_results = self._recent_results[-30:]
+
+            if pnl_final >= 0:
+                self.win += 1
+                self.consec_losses = 0
+            else:
+                self.loss += 1
+                self.consec_losses += 1
+
+            self.notify(f"✅ EXIT {symbol} {side} ({why}) price={price:.6f} pnl≈{pnl_final:.2f} day≈{self.day_profit:.2f} (W{self.win}/L{self.loss})")
+            _log_event(
+                "exit",
+                symbol=symbol,
+                side=side,
+                why=why,
+                exit_price=price,
+                entry_price=entry_price,
+                pnl=float(pnl_final),
+                pnl_source=self.state.get("last_pnl_source"),
+                partial_pnl=float(partial_pnl),
+                remaining_frac=float(remaining_frac),
+                qty_before=float(qty_before),
+            )
+            self.positions.pop(idx)
+            self._maybe_ai_grow()
+            try:
+                _eg_save_runtime(self, f"exit:{symbol}")
+            except Exception:
+                pass
+        Trader._exit_position = _exit_endgame
+
+    _orig_manage_endgame = getattr(Trader, "_manage_one", None)
+    if _orig_manage_endgame:
+        def _manage_one_endgame(self, idx: int):
+            before_tp1 = None
+            sym = None
+            if 0 <= idx < len(getattr(self, "positions", [])):
+                p = self.positions[idx]
+                before_tp1 = bool(p.get("tp1_done"))
+                sym = p.get("symbol")
+            out = _orig_manage_endgame(self, idx)
+            try:
+                if 0 <= idx < len(getattr(self, "positions", [])):
+                    p = self.positions[idx]
+                    p.setdefault("realized_pnl_partial", None)
+                    p.setdefault("realized_qty", 0.0)
+                    p.setdefault("remaining_qty_est", 1.0)
+                    if (before_tp1 is False) and bool(p.get("tp1_done")):
+                        inferred = _eg_infer_partial_pnl(p)
+                        p["realized_pnl_partial"] = float(inferred)
+                        p["realized_qty"] = float(PARTIAL_TP_PCT)
+                        rem = 1.0 - float(PARTIAL_TP_PCT)
+                        p["remaining_qty_est"] = rem if rem > 0 else 0.0
+                        _log_event("partial_tp", symbol=sym, partial_pnl=float(inferred), remaining_frac=float(p["remaining_qty_est"]))
+                        _eg_save_runtime(self, f"partial:{sym}")
+            except Exception:
+                pass
+            return out
+        Trader._manage_one = _manage_one_endgame
+
+    _orig_manual_enter_endgame = getattr(Trader, "manual_enter", None)
+    if _orig_manual_enter_endgame:
+        def _manual_enter_endgame(self, side: str):
+            try:
+                self._reset_day()
+                if len(self.positions) >= self.max_positions:
+                    self.notify("⚠️ 최대 포지션 수 도달")
+                    return
+                symbol = self.fixed_symbol
+                price = get_price(symbol)
+
+                try:
+                    scored = self._score_symbol(symbol, price)
+                except Exception:
+                    scored = {"ok": True}
+                if isinstance(scored, dict) and not bool(scored.get("ok", True)):
+                    block = str(scored.get("reason") or "entry_blocked")
+                    self.state["last_skip_reason"] = block
+                    self.notify(f"⛔ 수동진입 차단: {block}")
+                    _eg_save_runtime(self, f"manual_block:{symbol}")
+                    return
+
+                mp = self._mp()
+                ok, reason, score, sl, tp, a = compute_signal_and_exits(
+                    symbol, side, price, mp, avoid_low_rsi=bool(self.state.get("avoid_low_rsi", False))
+                )
+                if not ok:
+                    self.state["last_skip_reason"] = str(reason or "signal_not_ok")
+                    self.notify(f"⛔ 수동진입 차단: {reason}")
+                    _eg_save_runtime(self, f"manual_signal_block:{symbol}")
+                    return
+                self._enter(symbol, side, price, reason + "- manual=True\n", sl, tp)
+                _eg_save_runtime(self, f"manual_enter:{symbol}")
+            except Exception as e:
+                self.err_throttled(f"❌ manual enter 실패: {e}")
+        Trader.manual_enter = _manual_enter_endgame
+
+    _orig_status_endgame = getattr(Trader, "status_text", None)
+    if _orig_status_endgame:
+        def _status_endgame(self):
+            try:
+                base = _orig_status_endgame(self)
+                lines = str(base).split("\n") if base else []
+            except Exception:
+                lines = []
+            now_ts = int(time.time())
+            cooldown_left = max(0, int(getattr(self, "_cooldown_until", 0) - time.time()))
+            saved_ts = _eg_int(getattr(self, "state", {}).get("runtime_saved_ts", 0), 0)
+            saved_ago = (now_ts - saved_ts) if saved_ts > 0 else -1
+            lines.append(f"💾 runtime_saved_ts={saved_ts} | saved_ago={saved_ago}s | save_reason={self.state.get('runtime_save_reason', '-')}")
+            lines.append(f"🧯 kill_switch_cooldown={bool(self._ks.in_cooldown())} | cooldown_left={cooldown_left}s | cb_err_count={_eg_int(getattr(self, '_cb_err_count', 0), 0)}")
+            lines.append(f"📉 daily_pnl={_eg_float(getattr(self, 'daily_pnl', 0.0), 0.0):.2f} | consec_losses={_eg_int(getattr(self, 'consec_losses', 0), 0)} | last_skip={self.state.get('last_skip_reason', '-')}")
+            try:
+                iw = getattr(self, "_inst_weights", {}) or {}
+                if iw:
+                    preview = ", ".join([f"{k}:{float(v):.2f}" for k, v in list(iw.items())[:5]])
+                    lines.append(f"🏦 inst_weights={preview}")
+            except Exception:
+                pass
+            try:
+                recent = getattr(self, "_recent_results", []) or []
+                if recent:
+                    tail = ", ".join([f"{float(x):.2f}" for x in recent[-5:]])
+                    lines.append(f"🧪 recent_pnl={tail}")
+            except Exception:
+                pass
+            return "\n".join(lines)
+        Trader.status_text = _status_endgame
+
+    _orig_tick_endgame2 = getattr(Trader, "tick", None)
+    if _orig_tick_endgame2:
+        def _tick_endgame2(self):
+            out = _orig_tick_endgame2(self)
+            try:
+                if time.time() < getattr(self, "_cooldown_until", 0):
+                    self.state["last_skip_reason"] = "cooldown"
+                elif not bool(getattr(self, "trading_enabled", True)):
+                    self.state["last_skip_reason"] = "trading_off"
+                elif getattr(self, "positions", None):
+                    self.state["last_skip_reason"] = "holding_position"
+            except Exception:
+                pass
+            try:
+                _eg_save_runtime(self, "tick")
+            except Exception:
+                pass
+            return out
+        Trader.tick = _tick_endgame2
+
+    try:
+        Trader._save_runtime = _eg_save_runtime
+    except Exception:
+        pass
