@@ -1669,7 +1669,7 @@ class Trader:
             )
 
     # ---------------- Telegram commands ----------------
-        def handle_command(self, text: str):
+            def handle_command(self, text: str):
         cmd = (text or "").strip()
         if not cmd:
             return
@@ -1687,7 +1687,7 @@ class Trader:
         if not c0:
             return
 
-        arg = " ".join(parts[cmd_idx + 1:]) if cmd_idx >= 0 
+        arg = " ".join(parts[cmd_idx + 1:]) if cmd_idx >= 0 else ""
 
         if c0 == "/start":
             self.trading_enabled = True
