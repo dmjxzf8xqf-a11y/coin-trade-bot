@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+events.jsonl
+runtime_state.json
+daily_pnl.json
+learn_state.json
+ai_stats.json
+*.log
+data/*.json
