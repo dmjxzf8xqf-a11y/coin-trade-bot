@@ -3570,3 +3570,164 @@ try:
 
 except Exception as _entry_hard_patch_e:
     print(f"[ENTRY_HARDENING_PATCH] load failed: {_entry_hard_patch_e}")
+# =========================================================
+# ETH-ONLY HARDENING PATCH (append to END of trader.py)
+# 목적:
+# - ETHUSDT에만 보수형 하드닝 적용
+# - SOL/BTC 등 다른 심볼은 기존 로직 유지
+# - 백테스트에서 맞춘 방향(과진입 축소)을 실전에도 반영
+# =========================================================
+
+try:
+    import os as _eth_hard_os
+
+    def _eth_hard_bool(name: str, default: bool = False) -> bool:
+        try:
+            v = str(_eth_hard_os.getenv(name, str(default))).strip().lower()
+            return v in ("1", "true", "yes", "y", "on")
+        except Exception:
+            return default
+
+    def _eth_hard_float(name: str, default: float) -> float:
+        try:
+            return float(_eth_hard_os.getenv(name, str(default)))
+        except Exception:
+            return float(default)
+
+    def _eth_hard_targets():
+        raw = str(_eth_hard_os.getenv("HARD_TARGET_SYMBOLS", "ETHUSDT")).strip()
+        if not raw:
+            return {"ETHUSDT"}
+        return {x.strip().upper() for x in raw.split(",") if x.strip()}
+
+    _ETH_HARD_ON = _eth_hard_bool("HARDENING_ON", True)
+    _ETH_HARD_TARGETS = _eth_hard_targets()
+
+    # -----------------------------------------------------
+    # 1) __init__ 보강: ETH-only 하드닝용 기본 상태 강제
+    # -----------------------------------------------------
+    _orig_init_eth_hard = getattr(Trader, "__init__", None)
+    if callable(_orig_init_eth_hard):
+        def _eth_hard_init(self, *args, **kwargs):
+            _orig_init_eth_hard(self, *args, **kwargs)
+
+            try:
+                # low RSI 회피는 항상 켠다
+                if isinstance(getattr(self, "state", None), dict):
+                    self.state["avoid_low_rsi"] = True
+            except Exception:
+                pass
+
+            try:
+                # FIXED_SYMBOL이 ETHUSDT면 auto discovery 끔
+                fixed = str(_eth_hard_os.getenv("FIXED_SYMBOL", "")).upper()
+                if fixed in _ETH_HARD_TARGETS:
+                    self.auto_discovery = False
+            except Exception:
+                pass
+
+        Trader.__init__ = _eth_hard_init
+
+    # -----------------------------------------------------
+    # 2) _mp() 보강: ETH 대상일 때 보수값 강제
+    # -----------------------------------------------------
+    _orig_mp_eth_hard = getattr(Trader, "_mp", None)
+    if callable(_orig_mp_eth_hard):
+        def _eth_hard_mp(self, *args, **kwargs):
+            mp = _orig_mp_eth_hard(self, *args, **kwargs)
+
+            try:
+                if not isinstance(mp, dict):
+                    return mp
+
+                fixed = str(_eth_hard_os.getenv("FIXED_SYMBOL", "")).upper()
+                target_mode = fixed in _ETH_HARD_TARGETS
+
+                # FIXED가 ETH가 아니면 기존 로직 유지
+                if not target_mode:
+                    return mp
+
+                mode_u = str(getattr(self, "mode", "SAFE")).upper()
+
+                # 백테스트에서 통과한 ETH 보수값
+                mp["lev"] = 2
+                mp["order_usdt"] = 5.0
+                mp["enter_score"] = 78 if mode_u == "SAFE" else 72
+
+                # 손절/익절 기본값
+                mp["stop_atr"] = max(float(mp.get("stop_atr", 1.8) or 1.8), 1.8)
+                mp["tp_r"] = max(float(mp.get("tp_r", 2.4) or 2.4), 2.4)
+            except Exception:
+                pass
+
+            return mp
+
+        Trader._mp = _eth_hard_mp
+
+    # -----------------------------------------------------
+    # 3) apply_strategy_to_mp 보강:
+    #    ETH 대상일 때 mean_reversion 차단 + trend 계열만 강화
+    # -----------------------------------------------------
+    _orig_apply_strategy_to_mp_eth_hard = globals().get("apply_strategy_to_mp")
+    if callable(_orig_apply_strategy_to_mp_eth_hard):
+        def apply_strategy_to_mp(symbol: str, mp: dict, *args, **kwargs):
+            ok, msg, strategy = _orig_apply_strategy_to_mp_eth_hard(symbol, mp, *args, **kwargs)
+            if not ok:
+                return ok, msg, strategy
+
+            try:
+                sym_u = str(symbol or "").upper()
+                if not _ETH_HARD_ON or sym_u not in _ETH_HARD_TARGETS:
+                    return ok, msg, strategy
+
+                # ETH에선 mean reversion 계열 배제
+                if strategy == "mean_reversion":
+                    return False, "STRATEGY_BLOCKED_ETH_HARDENING", strategy
+
+                # trend 계열만 보수 강화
+                if strategy in ("trend_long", "trend_breakout", "trend_follow", "momentum_long"):
+                    if isinstance(mp, dict):
+                        mp["enter_score"] = max(int(mp.get("enter_score", 0) or 0), 78)
+                        mp["tp_r"] = max(float(mp.get("tp_r", 0) or 0), 2.4)
+                        mp["stop_atr"] = max(float(mp.get("stop_atr", 0) or 0), 1.8)
+
+                return True, msg, strategy
+            except Exception:
+                return ok, msg, strategy
+
+        globals()["apply_strategy_to_mp"] = apply_strategy_to_mp
+
+    # -----------------------------------------------------
+    # 4) low RSI, slope, target symbol 점검 헬퍼
+    #    entry 직전 추가 차단용
+    # -----------------------------------------------------
+    _orig_enter_eth_hard = getattr(Trader, "_enter", None)
+    if callable(_orig_enter_eth_hard):
+        def _eth_hard_enter(self, symbol, *args, **kwargs):
+            try:
+                sym_u = str(symbol or "").upper()
+                if _ETH_HARD_ON and sym_u in _ETH_HARD_TARGETS:
+                    # low RSI 회피
+                    try:
+                        if isinstance(getattr(self, "state", None), dict):
+                            self.state["avoid_low_rsi"] = True
+                    except Exception:
+                        pass
+
+                    # slope 필터는 기존 코드가 이미 쓰는 REGIME_MIN_SLOPE_BPS를 존중
+                    # 여기선 FIXED_SYMBOL이 ETH일 때만 entry 허용
+                    fixed = str(_eth_hard_os.getenv("FIXED_SYMBOL", "")).upper()
+                    if fixed and fixed != sym_u:
+                        return False
+
+                return _orig_enter_eth_hard(self, symbol, *args, **kwargs)
+            except Exception:
+                try:
+                    return _orig_enter_eth_hard(self, symbol, *args, **kwargs)
+                except Exception:
+                    return False
+
+        Trader._enter = _eth_hard_enter
+
+except Exception as _eth_hard_patch_err:
+    print(f"[ETH_ONLY_HARDENING_PATCH] load failed: {_eth_hard_patch_err}")
