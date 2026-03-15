@@ -1669,7 +1669,7 @@ class Trader:
             )
 
     # ---------------- Telegram commands ----------------
-        def handle_command(self, text: str):
+    def handle_command(self, text: str):
         cmd = (text or "").strip()
         if not cmd:
             return
@@ -1693,6 +1693,7 @@ class Trader:
             self.trading_enabled = True
             self.notify("✅ 거래 ON")
             return
+
         if c0 == "/stop":
             self.trading_enabled = False
             self.notify("🛑 거래 OFF")
