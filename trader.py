@@ -3838,6 +3838,8 @@ try:
 
 except Exception as _dbg_patch_err:
     print(f"[DEBUG_PATCH] load failed: {_dbg_patch_err}")
+cd /root/coin-trade-bot && cat >> trader.py <<'PY'
+
 # === STATUS DEBUG PATCH ===
 try:
     import os as _stdbg_os
@@ -3894,3 +3896,5 @@ try:
         Trader.tick = _tick_stdbg
 except Exception as e:
     print(f"[STATUS_DEBUG_PATCH] {e}")
+PY
+sudo systemctl restart coinbot
