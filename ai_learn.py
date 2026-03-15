@@ -1,146 +1,124 @@
-# ai_learn.py (FINAL: SUPABASE + DATA_DIR JSON FALLBACK + ATOMIC SAVE)
+# ai_learn.py
 import json
-import os
-from datetime import datetime
-import requests
-
+import time
+from typing import Dict, Any, List
 from storage_utils import data_path, safe_read_json, atomic_write_json
 
-# -------------------------
-# Local fallback files (DATA_DIR 아래로 고정)
-# -------------------------
 LEARN_FILE = data_path("learn_state.json")
-STATS_FILE = data_path("ai_stats.json")
+DEFAULT_STATE = {"global": {"trades": 0, "wins": 0, "losses": 0, "pnl_sum": 0.0, "recent": []}, "buckets": {}}
 
-# -------------------------
-# Supabase settings
-# -------------------------
-SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY") or ""
-SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "coin_stats")
-GLOBAL_SYMBOL = "__GLOBAL__"
+def _deep_default() -> Dict[str, Any]:
+    return json.loads(json.dumps(DEFAULT_STATE))
 
-def _sb_enabled() -> bool:
-    return bool(SUPABASE_URL and SUPABASE_KEY)
+def _load() -> Dict[str, Any]:
+    data = safe_read_json(LEARN_FILE, _deep_default())
+    if not isinstance(data, dict):
+        return _deep_default()
+    data.setdefault("global", _deep_default()["global"])
+    data.setdefault("buckets", {})
+    data["global"].setdefault("trades", 0)
+    data["global"].setdefault("wins", 0)
+    data["global"].setdefault("losses", 0)
+    data["global"].setdefault("pnl_sum", 0.0)
+    data["global"].setdefault("recent", [])
+    return data
 
-def _sb_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-    }
+def _save(data: Dict[str, Any]) -> None:
+    atomic_write_json(LEARN_FILE, data)
 
-def _sb_select_global():
-    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
-    params = {"select": "*", "symbol": f"eq.{GLOBAL_SYMBOL}", "limit": "1"}
-    r = requests.get(url, headers=_sb_headers(), params=params, timeout=10)
-    r.raise_for_status()
-    arr = r.json() if isinstance(r.json(), list) else []
-    return arr[0] if arr else None
+def _bucket_key(symbol: str, side: str, strategy: str, regime: str) -> str:
+    return f"{symbol}|{side}|{strategy}|{regime}"
 
-def _sb_upsert_global(row: dict):
-    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
-    headers = _sb_headers()
-    headers["Prefer"] = "resolution=merge-duplicates"
-    r = requests.post(url, headers=headers, data=json.dumps([row]), timeout=10)
-    r.raise_for_status()
-    return True
+def _append_recent(arr: List[dict], item: dict, maxlen: int = 120) -> None:
+    arr.append(item)
+    if len(arr) > maxlen:
+        del arr[:-maxlen]
 
-def _sb_patch_global(patch: dict):
-    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_TABLE}"
-    params = {"symbol": f"eq.{GLOBAL_SYMBOL}"}
-    headers = _sb_headers()
-    headers["Prefer"] = "return=minimal"
-    r = requests.patch(url, headers=headers, params=params, data=json.dumps(patch), timeout=10)
-    r.raise_for_status()
-    return True
+def _weighted_score(recent: List[dict]) -> float:
+    if not recent:
+        return 0.0
+    total_w = 0.0
+    win_score = 0.0
+    pnl_score = 0.0
+    n = len(recent)
+    for i, r in enumerate(recent):
+        age = (n - 1 - i)
+        w = 0.93 ** age
+        total_w += w
+        pnl = float(r.get("pnl", 0.0))
+        won = 1.0 if pnl > 0 else 0.0
+        win_score += won * w
+        pnl_score += pnl * w
+    if total_w <= 0:
+        return 0.0
+    winrate = win_score / total_w
+    avg_pnl = pnl_score / total_w
+    return round((winrate * 100.0 * 0.7) + (avg_pnl * 0.3), 4)
 
-# -------------------------
-# JSON fallback (ATOMIC + RECOVERY)
-# -------------------------
-def _load_json(path, default):
-    return safe_read_json(path, default)
+def record_trade_result(pnl: float) -> None:
+    data = _load()
+    g = data["global"]
+    g["trades"] += 1
+    if pnl > 0:
+        g["wins"] += 1
+    elif pnl < 0:
+        g["losses"] += 1
+    g["pnl_sum"] += float(pnl)
+    _append_recent(g["recent"], {"ts": int(time.time()), "pnl": float(pnl)})
+    _save(data)
 
-def _save_json(path, obj):
-    try:
-        atomic_write_json(path, obj, backup=True)
-    except Exception:
-        pass
+def record_trade_result_ex(pnl: float, symbol: str, side: str, strategy: str, regime: str, enter_score: float = 0.0, reason: str = "") -> None:
+    data = _load()
+    g = data["global"]
+    g["trades"] += 1
+    if pnl > 0:
+        g["wins"] += 1
+    elif pnl < 0:
+        g["losses"] += 1
+    g["pnl_sum"] += float(pnl)
+    _append_recent(g["recent"], {"ts": int(time.time()), "pnl": float(pnl), "symbol": symbol, "side": side, "strategy": strategy, "regime": regime, "enter_score": float(enter_score), "reason": reason})
+    key = _bucket_key(symbol, side, strategy, regime)
+    b = data["buckets"].setdefault(key, {"symbol": symbol, "side": side, "strategy": strategy, "regime": regime, "trades": 0, "wins": 0, "losses": 0, "pnl_sum": 0.0, "recent": []})
+    b["trades"] += 1
+    if pnl > 0:
+        b["wins"] += 1
+    elif pnl < 0:
+        b["losses"] += 1
+    b["pnl_sum"] += float(pnl)
+    _append_recent(b["recent"], {"ts": int(time.time()), "pnl": float(pnl), "enter_score": float(enter_score), "reason": reason})
+    _save(data)
 
-# -------------------------
-# Public APIs
-# -------------------------
-def load_state():
-    # Supabase 우선
-    if _sb_enabled():
-        try:
-            row = _sb_select_global()
-            if not row:
-                _sb_upsert_global({"symbol": GLOBAL_SYMBOL})
-                row = _sb_select_global() or {}
-            return {
-                "wins": int(row.get("wins") or 0),
-                "losses": int(row.get("losses") or 0),
-                "enter_score": int(row.get("enter_score") or 60),
-            }
-        except Exception as e:
-    print("❌ Supabase load error:", e)
+def get_bucket_score(symbol: str, side: str, strategy: str, regime: str) -> float:
+    data = _load()
+    b = data["buckets"].get(_bucket_key(symbol, side, strategy, regime))
+    return _weighted_score(b.get("recent", [])) if b else 0.0
 
-    # fallback
-    return _load_json(LEARN_FILE, {"wins": 0, "losses": 0, "enter_score": 60})
+def get_symbol_side_score(symbol: str, side: str) -> float:
+    data = _load()
+    scores = []
+    for b in data["buckets"].values():
+        if b.get("symbol") == symbol and b.get("side") == side:
+            scores.append(_weighted_score(b.get("recent", [])))
+    return round(sum(scores) / len(scores), 4) if scores else 0.0
 
-def save_state(state):
-    # Supabase 우선
-    if _sb_enabled():
-        try:
-            patch = {
-                "wins": int(state.get("wins") or 0),
-                "losses": int(state.get("losses") or 0),
-                "enter_score": int(state.get("enter_score") or 60),
-                "last_update": datetime.utcnow().isoformat(),
-            }
-            _sb_patch_global(patch)
-            return
-        except Exception as e:
-    print("❌ Supabase load error:", e)
-
-    _save_json(LEARN_FILE, state)
-
-def update_result(win: bool):
-    state = load_state()
-
-    if win:
-        state["wins"] = int(state.get("wins") or 0) + 1
-    else:
-        state["losses"] = int(state.get("losses") or 0) + 1
-
-    total = int(state.get("wins") or 0) + int(state.get("losses") or 0)
-
-    # 자동 튜닝 (원래 의도 유지)
-    if total >= 20:
-        winrate = (state["wins"] / max(total, 1)) * 100.0
-        # 너무 공격적/보수적으로 튀지 않게 완만 조정
-        if winrate >= 60:
-            state["enter_score"] = min(75, int(state.get("enter_score") or 60) + 1)
-        elif winrate <= 45:
-            state["enter_score"] = max(45, int(state.get("enter_score") or 60) - 1)
-
-    save_state(state)
-    return state
-
-def get_ai_stats():
-    # wins/losses 기반으로 항상 일관되게 표시
-    st = load_state()
-    wins = int(st.get("wins") or 0)
-    losses = int(st.get("losses") or 0)
-    total = wins + losses
-    winrate = round((wins / total) * 100, 2) if total > 0 else 0.0
-    return {"wins": wins, "losses": losses, "winrate": winrate, "enter_score": int(st.get("enter_score") or 60)}
-
-def record_trade_result(pnl: float):
-    # pnl>0 win, pnl<=0 loss
-    return update_result(bool(pnl > 0))
+def get_global_score() -> float:
+    data = _load()
+    return _weighted_score(data["global"].get("recent", []))
 
 def check_winrate_milestone():
-    # 필요하면 너가 기존에 쓰던 알림 로직 붙일 자리 (현재는 None)
+    stats = get_ai_stats()
+    wr = float(stats.get("winrate", 0.0))
+    if wr >= 70 and int(stats.get("trades", 0)) >= 20:
+        return f"ð AI ì¹ë¥  ì¢ì: {wr:.1f}%"
+    if wr <= 35 and int(stats.get("trades", 0)) >= 20:
+        return f"â ï¸ AI ì¹ë¥  ë®ì: {wr:.1f}%"
     return None
+
+def get_ai_stats():
+    data = _load()
+    g = data["global"]
+    trades = int(g.get("trades", 0))
+    wins = int(g.get("wins", 0))
+    losses = int(g.get("losses", 0))
+    winrate = (wins / trades * 100.0) if trades > 0 else 0.0
+    return {"trades": trades, "wins": wins, "losses": losses, "winrate": round(winrate, 2), "pnl_sum": round(float(g.get("pnl_sum", 0.0)), 4), "global_score": round(get_global_score(), 4)}
