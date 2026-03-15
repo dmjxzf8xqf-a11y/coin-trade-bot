@@ -1,17 +1,44 @@
-# telegram_command_parser.py
-def parse_command_text(text: str):
+# 텔레그램 버튼/명령 파서
+# 한글, 이모지, /status 같은 혼합 버튼을 안정적으로 처리하기 위한 보조 파일
+
+from typing import Tuple
+
+_ALIAS_MAP = {
+    "상태": "/status",
+    "시작": "/start",
+    "중지": "/stop",
+    "도움말": "/help",
+    "안전": "/safe",
+    "공격": "/aggro",
+    "매수": "/buy",
+    "숏": "/short",
+    "긴급청산": "/panic",
+    "버튼켜기": "/ui",
+    "버튼끄기": "/ui",
+}
+
+
+def extract_command_and_arg(text: str) -> Tuple[str, str]:
     cmd = (text or "").strip()
     if not cmd:
         return "", ""
+
     parts = cmd.split()
-    c0 = ""
-    cmd_idx = -1
+
+    # 우선 / 로 시작하는 토큰 찾기
     for i, p in enumerate(parts):
         if p.startswith("/"):
-            c0 = p.lower()
-            cmd_idx = i
-            break
-    if not c0:
-        return "", ""
-    arg = " ".join(parts[cmd_idx + 1:]) if cmd_idx >= 0 else ""
-    return c0, arg
+            return p.lower(), " ".join(parts[i + 1:]).strip()
+
+    # 없으면 한글 별칭으로 처리
+    normalized = cmd.replace(" ", "")
+    for k, v in _ALIAS_MAP.items():
+        if k in normalized:
+            if v == "/ui":
+                if "켜기" in normalized:
+                    return "/ui", "on"
+                if "끄기" in normalized:
+                    return "/ui", "off"
+            return v, ""
+
+    return "", ""
