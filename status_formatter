@@ -1,0 +1,36 @@
+# /status 한글 상태창 포맷터
+import time
+
+
+def _fmt_ts(ts):
+    try:
+        if not ts:
+            return "-"
+        return time.strftime("%m-%d %H:%M:%S", time.localtime(float(ts)))
+    except Exception:
+        return "-"
+
+
+def format_status_text(state: dict) -> str:
+    s = state or {}
+    boot_ts = float(s.get("boot_ts") or time.time())
+    uptime = int(max(0, time.time() - boot_ts))
+
+    lines = []
+    lines.append("📌 봇 상태")
+    lines.append(f"거래상태: {'ON' if s.get('trading_enabled', True) else 'OFF'}")
+    lines.append(f"모드: {s.get('mode', '-')}")
+    lines.append(f"버튼UI: {'ON' if s.get('tg_buttons_on', False) else 'OFF'}")
+    lines.append(f"현재심볼: {s.get('symbol') or s.get('last_symbol') or '-'}")
+    lines.append(f"시장국면: {s.get('market_regime', '-')}")
+    lines.append(f"전략명: {s.get('strategy_name', '-')}")
+    lines.append(f"AI점수: {s.get('last_ai_score', '-')}")
+    lines.append(f"최근시그널: {s.get('last_signal_score', '-')}")
+    lines.append(f"오늘손익: {s.get('day_profit', s.get('daily_pnl', 0.0))}")
+    lines.append(f"연속손실: {s.get('consec_losses', 0)}")
+    lines.append(f"최근명령: {s.get('last_cmd', '-')}")
+    lines.append(f"최근명령시각: {_fmt_ts(s.get('last_cmd_ts'))}")
+    lines.append(f"최근주문: {s.get('last_order_result', '-')}")
+    lines.append(f"최근에러: {s.get('last_error', '-')}")
+    lines.append(f"가동시간: {uptime}초")
+    return "\n".join(lines)
