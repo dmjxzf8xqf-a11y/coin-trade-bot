@@ -1,0 +1,1 @@
+print("AUTO SEARCH OK")
