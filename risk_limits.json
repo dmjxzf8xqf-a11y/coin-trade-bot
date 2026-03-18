@@ -1,0 +1,6 @@
+{
+  "daily_loss_stop_pct": -3.0,
+  "max_consec_losses": 3,
+  "cooldown_minutes_after_loss": 30,
+  "force_off_if_no_config": true
+}
