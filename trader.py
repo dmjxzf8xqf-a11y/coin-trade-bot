@@ -3894,10 +3894,5 @@ try:
                 pass
             return rv
         Trader.tick = _tick_stdbg
-except Exception as e:
-    print(f"[STATUS_DEBUG_PATCH] {e}")
-except Exception as e:
-    print(f"[STATUS_DEBUG_PATCH_ERR] {e}")
-
 from trader_stability_append import apply_trader_stability_patch
 apply_trader_stability_patch(Trader)
