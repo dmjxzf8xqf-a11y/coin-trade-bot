@@ -3995,3 +3995,46 @@ try:
 
 except Exception as e:
     print("quant patch fail:", e)
+# ===== QUANT PATCH 2 (ADX + VOLUME) =====
+try:
+    _orig_tick_quant2 = Trader.tick
+
+    def _quant_tick2(self, *args, **kwargs):
+        try:
+            if not hasattr(self, "state") or not isinstance(self.state, dict):
+                self.state = {}
+
+            # ===== ADX 필터 =====
+            adx = self.state.get("adx")
+            if adx is not None:
+                try:
+                    if float(adx) < 20:
+                        self.state["last_skip_reason"] = "low_trend_adx"
+                        return
+                except Exception:
+                    pass
+
+            # ===== 볼륨 필터 =====
+            vol = self.state.get("volume")
+            vol_ma = self.state.get("volume_ma")
+
+            if vol is not None and vol_ma is not None:
+                try:
+                    if float(vol) < float(vol_ma) * 1.2:
+                        self.state["last_skip_reason"] = "low_volume"
+                        return
+                except Exception:
+                    pass
+
+        except Exception as e:
+            try:
+                self.state["last_skip_reason"] = f"quant2_err:{e}"
+            except Exception:
+                pass
+
+        return _orig_tick_quant2(self, *args, **kwargs)
+
+    Trader.tick = _quant_tick2
+
+except Exception as e:
+    print("quant2 patch fail:", e)
