@@ -3838,33 +3838,133 @@ try:
 
 except Exception as _dbg_patch_err:
     print(f"[DEBUG_PATCH] load failed: {_dbg_patch_err}")
-cd /root/coin-trade-bot && cat >> trader.py <<'PY'
 
-# === STATUS DEBUG PATCH ===
+# ===== STABILITY PATCH (safe append) =====
 try:
-    import os as _stdbg_os
-    import time as _stdbg_time
+    import time as _stb_time
+    import os as _stb_os
 
-    _orig_status_text_stdbg = getattr(Trader, "status_text", None)
-    if callable(_orig_status_text_stdbg):
-        def _status_text_stdbg(self, *args, **kwargs):
-            base = _orig_status_text_stdbg(self, *args, **kwargs)
+    def _stb_set_skip(self, reason: str):
+        try:
+            if not hasattr(self, "state") or not isinstance(self.state, dict):
+                self.state = {}
+            self.state["last_skip_reason"] = str(reason)
+        except Exception:
+            pass
+
+    def _stb_detect_regime_safe(self, symbol: str) -> str:
+        try:
             try:
-                mp = self._mp() if hasattr(self, "_mp") and callable(self._mp) else {}
-                if not isinstance(mp, dict):
-                    mp = {}
-                fixed = str(_stdbg_os.getenv("FIXED_SYMBOL", "NONE")).upper()
-                last_skip = getattr(self, "state", {}).get("last_skip_reason", "NONE")
-                last_event = getattr(self, "state", {}).get("last_event", "NONE")
-                extra = []
-                extra.append(f"🧪 DBG fixed={fixed}")
-                extra.append(
-                    f"🧮 DBG lev={mp.get('lev','?')} usdt={mp.get('order_usdt','?')} "
-                    f"score>={mp.get('enter_score','?')} stop_atr={mp.get('stop_atr','?')} tp_r={mp.get('tp_r','?')}"
+                from market_regime import detect_regime as _detect_regime_fn  # type: ignore
+                r = _detect_regime_fn(symbol)
+                return str(r).lower()
+            except Exception:
+                pass
+            if hasattr(self, "market_regime") and callable(getattr(self, "market_regime")):
+                r = self.market_regime(symbol)
+                return str(r).lower()
+        except Exception:
+            pass
+        return "unknown"
+
+    def _stb_after_close_update_risk(self, pnl_pct: float):
+        now = _stb_time.time()
+        try:
+            if not hasattr(self, "state") or not isinstance(self.state, dict):
+                self.state = {}
+        except Exception:
+            self.state = {}
+        if not hasattr(self, "consec_losses"):
+            self.consec_losses = 0
+        if not hasattr(self, "cooldown_until_ts"):
+            self.cooldown_until_ts = 0
+        if pnl_pct > 0:
+            self.consec_losses = 0
+            self.cooldown_until_ts = 0
+            self.state["last_risk_event"] = "win_reset"
+            return
+        self.consec_losses += 1
+        if self.consec_losses == 1:
+            cd = 15 * 60
+        elif self.consec_losses == 2:
+            cd = 60 * 60
+        else:
+            cd = 4 * 60 * 60
+        self.cooldown_until_ts = now + cd
+        self.state["last_risk_event"] = f"loss_cooldown:{cd}s"
+
+    Trader._set_skip = _stb_set_skip
+    Trader._detect_regime_safe = _stb_detect_regime_safe
+    Trader._after_close_update_risk = _stb_after_close_update_risk
+
+    _orig_init_stb = getattr(Trader, "__init__", None)
+    if callable(_orig_init_stb):
+        def __init__stb(self, *args, **kwargs):
+            _orig_init_stb(self, *args, **kwargs)
+            try:
+                if not hasattr(self, "state") or not isinstance(self.state, dict):
+                    self.state = {}
+            except Exception:
+                self.state = {}
+            if not hasattr(self, "consec_losses"):
+                self.consec_losses = 0
+            if not hasattr(self, "cooldown_until_ts"):
+                self.cooldown_until_ts = 0
+        Trader.__init__ = __init__stb
+
+    _orig_tick_stb = getattr(Trader, "tick", None)
+    if callable(_orig_tick_stb):
+        def _tick_stb(self, *args, **kwargs):
+            now_ts = _stb_time.time()
+            try:
+                if not hasattr(self, "state") or not isinstance(self.state, dict):
+                    self.state = {}
+            except Exception:
+                self.state = {}
+            if not hasattr(self, "consec_losses"):
+                self.consec_losses = 0
+            if not hasattr(self, "cooldown_until_ts"):
+                self.cooldown_until_ts = 0
+            if now_ts < getattr(self, "cooldown_until_ts", 0):
+                left = int(self.cooldown_until_ts - now_ts)
+                self._set_skip(f"loss_cooldown_left:{left}s")
+                return None
+            try:
+                symbol = (
+                    str(_stb_os.getenv("FIXED_SYMBOL", "")).strip().upper()
+                    or str(getattr(self, "fixed_symbol", "")).strip().upper()
+                    or str(getattr(self, "symbol", "")).strip().upper()
                 )
-                extra.append(f"🚫 DBG skip={last_skip}")
-                extra.append(f"📌 DBG event={last_event}")
+                if symbol:
+                    regime = self._detect_regime_safe(symbol)
+                    self.state["last_regime"] = regime
+                    if regime in ("range", "chop", "sideways"):
+                        self._set_skip(f"regime_block:{regime}")
+                        return None
+            except Exception:
+                pass
+            return _orig_tick_stb(self, *args, **kwargs)
+        Trader.tick = _tick_stb
+
+    _orig_status_text_stb = getattr(Trader, "status_text", None)
+    if callable(_orig_status_text_stb):
+        def _status_text_stb(self, *args, **kwargs):
+            base = _orig_status_text_stb(self, *args, **kwargs)
+            try:
+                last_skip = getattr(self, "state", {}).get("last_skip_reason", "-")
+                last_regime = getattr(self, "state", {}).get("last_regime", "-")
+                last_risk = getattr(self, "state", {}).get("last_risk_event", "-")
+                cooldown_left = max(0, int(getattr(self, "cooldown_until_ts", 0) - _stb_time.time()))
+                extra = [
+                    f"⏭️ last_skip={last_skip}",
+                    f"🌊 regime={last_regime}",
+                    f"🧯 risk={last_risk}",
+                    f"⏳ cooldown_left={cooldown_left}s",
+                ]
                 return str(base) + "\n" + "\n".join(extra)
             except Exception:
                 return base
-        Trader.status_text = _status_text_stdbg
+        Trader.status_text = _status_text_stb
+
+except Exception as _stb_e:
+    print(f"[STABILITY_PATCH_ERR] {_stb_e}")
