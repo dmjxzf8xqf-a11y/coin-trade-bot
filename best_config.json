@@ -1,0 +1,15 @@
+"selected": {
+    "mode": "long",
+    "symbol": "SOLUSDT",
+    "enter_score": 70,
+    "sl_atr": 1.5,
+    "tp_atr": 1.0,
+    "time_exit_bars": 0,
+    "trades": 84,
+    "win": 69.05,
+    "bal": 102.1,
+    "score": 124.9,
+    "usable": true
+  },
+  "top10": [],
+  "usable_count": 1
