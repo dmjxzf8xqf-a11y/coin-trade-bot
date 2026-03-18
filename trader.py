@@ -3968,3 +3968,30 @@ try:
 
 except Exception as _stb_e:
     print(f"[STABILITY_PATCH_ERR] {_stb_e}")
+# ===== QUANT PATCH (APPEND SAFE) =====
+try:
+    import time
+    from datetime import datetime
+
+    _orig_tick = Trader.tick
+
+    def _quant_tick(self, *args, **kwargs):
+
+        # ===== FILTER =====
+        hour = datetime.utcnow().hour
+        if 3 <= hour <= 8:
+            self.state["last_skip_reason"] = "time_filter"
+            return
+
+        last_loss_ts = self.state.get("last_loss_ts")
+        if last_loss_ts and time.time() - last_loss_ts < 600:
+            self.state["last_skip_reason"] = "loss_cooldown"
+            return
+
+        # ===== ORIGINAL =====
+        return _orig_tick(self, *args, **kwargs)
+
+    Trader.tick = _quant_tick
+
+except Exception as e:
+    print("quant patch fail:", e)
