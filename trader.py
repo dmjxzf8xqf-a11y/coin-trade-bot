@@ -3868,31 +3868,3 @@ try:
             except Exception:
                 return base
         Trader.status_text = _status_text_stdbg
-
-    _orig_tick_stdbg = getattr(Trader, "tick", None)
-    if callable(_orig_tick_stdbg):
-        def _tick_stdbg(self, *args, **kwargs):
-            rv = _orig_tick_stdbg(self, *args, **kwargs)
-            try:
-                now = _stdbg_time.time()
-                last_ts = float(getattr(self, "_stdbg_last_ts", 0.0) or 0.0)
-                if now - last_ts >= 30:
-                    self._stdbg_last_ts = now
-                    mp = self._mp() if hasattr(self, "_mp") and callable(self._mp) else {}
-                    if not isinstance(mp, dict):
-                        mp = {}
-                    fixed = str(_stdbg_os.getenv("FIXED_SYMBOL", "NONE")).upper()
-                    last_skip = getattr(self, "state", {}).get("last_skip_reason", "NONE")
-                    last_event = getattr(self, "state", {}).get("last_event", "NONE")
-                    print(
-                        f"[DBG] fixed={fixed} lev={mp.get('lev','?')} usdt={mp.get('order_usdt','?')} "
-                        f"enter>={mp.get('enter_score','?')} stop_atr={mp.get('stop_atr','?')} "
-                        f"tp_r={mp.get('tp_r','?')} skip={last_skip} event={last_event}",
-                        flush=True
-                    )
-            except Exception:
-                pass
-            return rv
-        Trader.tick = _tick_stdbg
-from trader_stability_append import apply_trader_stability_patch
-apply_trader_stability_patch(Trader)
