@@ -91,9 +91,12 @@ def telegram_loop():
     global _runtime_chat_id
     offset = None
 
+    print(f"[TG] loop start TELEGRAM_API={bool(TELEGRAM_API)} CHAT_ID_ENV={bool(CHAT_ID_ENV)}", flush=True)
+
     while True:
         try:
             if not TELEGRAM_API:
+                print("[TG] TELEGRAM_API missing", flush=True)
                 time.sleep(2)
                 continue
 
@@ -103,7 +106,11 @@ def telegram_loop():
                 timeout=POLL_TIMEOUT + 10,
                 proxies=PROXIES,
             )
+
             data = r.json()
+            print(f"[TG] getUpdates ok={data.get('ok')} result_len={len(data.get('result', []))}", flush=True)
+
+            # 기존 아래 코드는 그대로
 
             for item in data.get("result", []):
                 offset = item["update_id"] + 1
