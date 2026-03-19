@@ -4165,3 +4165,18 @@ try:
 
 except:
     pass
+# ===== FORCE LOAD BEST CONFIG =====
+try:
+    import json
+
+    with open("best_config.json", "r") as f:
+        cfg = json.load(f)
+
+    selected = cfg.get("selected", {})
+
+    self.state["ai_symbol"] = selected.get("symbol", "ETHUSDT")
+    self.state["ai_mode"] = selected.get("mode", "long")
+    self.state["ai_reason"] = "best_config"
+
+except:
+    pass
