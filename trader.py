@@ -3972,6 +3972,31 @@ try:
             except Exception:
                 return base
         Trader.status_text = _status_text_stb
+# ===== LOG THROTTLE PATCH =====
+import time
+import logging
 
+# Flask 로그 줄이기
+try:
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+except Exception:
+    pass
+
+# 로그 쓰로틀
+__last_log_ts = {}
+
+def log_throttled(key, msg, sec=60):
+    now = time.time()
+    last = __last_log_ts.get(key, 0)
+    if now - last >= sec:
+        print(msg)
+        __last_log_ts[key] = now
+
+# 기존 print 대체용 (선택)
+def safe_log(msg, key="default", sec=60):
+    try:
+        log_throttled(key, msg, sec)
+    except Exception:
+        print(msg)
 except Exception as _stb_e:
     print(f"[STABILITY_PATCH_ERR] {_stb_e}")
