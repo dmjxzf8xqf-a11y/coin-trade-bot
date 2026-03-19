@@ -1,6 +1,21 @@
 {
-  "daily_loss_stop_pct": -3.0,
-  "max_consec_losses": 3,
-  "cooldown_minutes_after_loss": 30,
-  "force_off_if_no_config": true
+  "daily_loss_stop_pct": -2.5,
+  "max_consec_losses": 2,
+  "cooldown_minutes_after_loss": 45,
+  "resume_min_wins_last5": 2,
+  "resume_need_trend_recovery": true,
+
+  "regime_risk": {
+    "bull": { "risk_pct": 0.015, "leverage": 3 },
+    "neutral": { "risk_pct": 0.008, "leverage": 2 },
+    "bear": { "risk_pct": 0.004, "leverage": 1 },
+    "range": { "risk_pct": 0.0, "leverage": 1 },
+    "unknown": { "risk_pct": 0.005, "leverage": 1 }
+  },
+
+  "mode_risk_multipliers": {
+    "long": 1.0,
+    "short": 0.6,
+    "off": 0.0
+  }
 }
