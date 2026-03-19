@@ -4202,3 +4202,31 @@ try:
 
 except Exception as e:
     print("BEST CONFIG LOAD FAIL:", e)
+cat >> /root/coin-trade-bot/trader.py <<'PY'
+
+# ===== FORCE FIX SYMBOL + STRATEGY =====
+try:
+    _orig_tick_fixsym = getattr(Trader, "tick", None)
+
+    def _fixsym_tick(self, *args, **kwargs):
+        try:
+            # 강제 심볼 고정
+            self.fixed_symbol = "ETHUSDT"
+            self.auto_symbol = False
+
+            if not hasattr(self, "state") or not isinstance(self.state, dict):
+                self.state = {}
+
+            self.state["ai_symbol"] = "ETHUSDT"
+            self.state["ai_mode"] = "long"
+            self.state["ai_reason"] = "forced_fix"
+        except:
+            pass
+
+        return _orig_tick_fixsym(self, *args, **kwargs)
+
+    Trader.tick = _fixsym_tick
+except Exception as e:
+    print("FIX SYMBOL PATCH FAIL:", e)
+
+PY
