@@ -4000,3 +4000,25 @@ def safe_log(msg, key="default", sec=60):
         print(msg)
 except Exception as _stb_e:
     print(f"[STABILITY_PATCH_ERR] {_stb_e}")
+# ===== DEBUG LOG LIMIT PATCH =====
+import builtins
+import time
+
+__last_dbg_ts = 0
+
+_orig_print = builtins.print
+
+def _patched_print(*args, **kwargs):
+    global __last_dbg_ts
+    msg = " ".join(str(a) for a in args)
+
+    # DBG 로그만 제한
+    if "[DBG]" in msg:
+        now = time.time()
+        if now - __last_dbg_ts < 10:   # 10초에 한번만
+            return
+        __last_dbg_ts = now
+
+    _orig_print(*args, **kwargs)
+
+builtins.print = _patched_print
