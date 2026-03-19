@@ -4042,3 +4042,44 @@ from trader_ai_runtime_patch import apply_trader_ai_runtime_patch
 apply_trader_ai_runtime_patch(Trader)
 from trader_ai_risk_leverage_patch import apply_trader_ai_risk_leverage_patch
 apply_trader_ai_risk_leverage_patch(Trader)
+# ===== AUTO AI OVERRIDE PATCH (BOTTOM SAFE) =====
+try:
+    def _ai_override_patch(self):
+        # 기본값 보정
+        conf = float(self.state.get("ai_confidence", 0) or 0)
+
+        if conf == 0:
+            conf = 0.7
+            self.state["ai_confidence"] = conf
+
+        if self.state.get("ai_regime") in (None, "unknown"):
+            self.state["ai_regime"] = "trend"
+
+        # 공격형 레버리지 + 리스크
+        if conf >= 0.8:
+            lev = 20
+            risk = 0.07
+        elif conf >= 0.6:
+            lev = 10
+            risk = 0.05
+        else:
+            lev = 5
+            risk = 0.02
+
+        self.state["ai_leverage"] = lev
+        self.state["risk_pct"] = risk
+
+    # tick 함수에 자동 주입
+    _orig_tick = getattr(Trader, "tick", None)
+    if callable(_orig_tick):
+        def _patched_tick(self, *args, **kwargs):
+            try:
+                _ai_override_patch(self)
+            except Exception:
+                pass
+            return _orig_tick(self, *args, **kwargs)
+
+        Trader.tick = _patched_tick
+
+except Exception:
+    pass
