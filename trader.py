@@ -4135,3 +4135,33 @@ try:
 
 except:
     pass
+# ===== AUTO COMPOUND POSITION SIZE =====
+try:
+    wins = int(self.state.get("consec_wins", 0) or 0)
+    losses = int(self.state.get("consec_losses", 0) or 0)
+
+    base = 20  # 기본 주문금액 (네 기준)
+
+    if wins >= 3:
+        order_usdt = base * 2.0   # 40
+    elif wins == 2:
+        order_usdt = base * 1.5   # 30
+    elif wins == 1:
+        order_usdt = base * 1.2   # 24
+    else:
+        order_usdt = base
+
+    # 손실 시 리셋
+    if losses >= 1:
+        order_usdt = base * 0.8   # 16
+
+    # 계좌 보호 (최대 제한)
+    balance = float(self.state.get("balance", 200) or 200)
+    max_size = balance * 0.2   # 최대 20%
+
+    order_usdt = min(order_usdt, max_size)
+
+    self.state["order_usdt"] = round(order_usdt, 2)
+
+except:
+    pass
