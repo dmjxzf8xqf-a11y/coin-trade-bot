@@ -2,8 +2,26 @@ import os
 import time
 import threading
 import requests
-from dotenv import load_dotenv
-from flask import Flask, jsonify
+try:
+    from dotenv import load_dotenv
+except Exception:
+    def load_dotenv(*args, **kwargs):
+        return False
+
+try:
+    from flask import Flask, jsonify
+except Exception:
+    class Flask:
+        def __init__(self, name):
+            self.name = name
+        def get(self, _path):
+            def deco(fn):
+                return fn
+            return deco
+        def run(self, host="0.0.0.0", port=8080):
+            print(f"[WARN] Flask not installed. Web server disabled ({host}:{port})", flush=True)
+    def jsonify(obj):
+        return obj
 
 load_dotenv()
 

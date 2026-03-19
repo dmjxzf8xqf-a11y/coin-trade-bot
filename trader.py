@@ -3386,7 +3386,9 @@ if HARDENING_ON:
 # =========================================================
 
 try:
-    _entry_hard_prev_compute = Trader.compute_signal_and_exits
+    _entry_hard_prev_compute = getattr(Trader, "compute_signal_and_exits", None)
+    if _entry_hard_prev_compute is None:
+        _entry_hard_prev_compute = globals().get("compute_signal_and_exits")
 
     def _safe_float(v, default=0.0):
         try:
@@ -3542,7 +3544,12 @@ try:
             return False, f"hardening:error({e})"
 
     def _entry_hard_compute_signal_and_exits(self, *args, **kwargs):
-        out = _entry_hard_prev_compute(self, *args, **kwargs)
+        if _entry_hard_prev_compute is None:
+            return {"signal": None, "why": "hardening:no_base_compute"}
+        if getattr(_entry_hard_prev_compute, "__self__", None) is None and getattr(_entry_hard_prev_compute, "__name__", "") == "compute_signal_and_exits":
+            out = _entry_hard_prev_compute(*args, **kwargs)
+        else:
+            out = _entry_hard_prev_compute(self, *args, **kwargs)
 
         try:
             # 기존 반환이 dict라고 가정
