@@ -4083,3 +4083,22 @@ try:
 
 except Exception:
     pass
+# ===== HARD FORCE AI PATCH =====
+try:
+    def _force_ai_patch(self):
+        self.state["ai_confidence"] = 0.7
+        self.state["ai_regime"] = "trend"
+
+        self.state["ai_leverage"] = 10
+        self.state["risk_pct"] = 0.03
+
+    _orig_tick = Trader.tick
+
+    def _new_tick(self, *args, **kwargs):
+        _force_ai_patch(self)
+        return _orig_tick(self, *args, **kwargs)
+
+    Trader.tick = _new_tick
+
+except Exception as e:
+    print("AI PATCH FAIL:", e)
