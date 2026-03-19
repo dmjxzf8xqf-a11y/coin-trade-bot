@@ -1,9 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+trader_ai_risk_leverage_patch.py
+
+안전형 통합 패치:
+- best_config.json 자동 적용
+- ai_regime / ai_confidence 계산
+- risk_limits.json 기반 자동 리스크/레버리지
+- 손실 후 방어 / 복구 대기
+- status_text()에 상태 추가
+
+사용법:
+trader.py 맨 아래에 아래 2줄 추가
+--------------------------------
+from trader_ai_risk_leverage_patch import apply_trader_ai_risk_leverage_patch
+apply_trader_ai_risk_leverage_patch(Trader)
+--------------------------------
+"""
+
 import json
 import time
 from pathlib import Path
+
 
 BEST_CONFIG_PATH = Path("best_config.json")
 RISK_LIMITS_PATH = Path("risk_limits.json")
@@ -21,22 +40,37 @@ DEFAULT_BEST = {
 }
 
 DEFAULT_RISK = {
-    "daily_loss_stop_pct": -3.0,
-    "max_consec_losses": 3,
-    "cooldown_minutes_after_loss": 30,
-    "resume_min_wins_last5": 3,
+    "daily_loss_stop_pct": -2.5,
+    "max_consec_losses": 2,
+    "cooldown_minutes_after_loss": 45,
+    "resume_min_wins_last5": 2,
     "resume_need_trend_recovery": True,
     "regime_risk": {
-        "bull":    {"risk_pct": 0.03,  "leverage": 4},
-        "neutral": {"risk_pct": 0.015, "leverage": 2},
-        "bear":    {"risk_pct": 0.008, "leverage": 1},
+        "bull":    {"risk_pct": 0.015, "leverage": 3},
+        "neutral": {"risk_pct": 0.008, "leverage": 2},
+        "bear":    {"risk_pct": 0.004, "leverage": 1},
         "range":   {"risk_pct": 0.0,   "leverage": 1},
-        "unknown": {"risk_pct": 0.01,  "leverage": 1},
+        "unknown": {"risk_pct": 0.005, "leverage": 1},
     },
     "mode_risk_multipliers": {
         "long": 1.0,
-        "short": 0.8,
+        "short": 0.6,
         "off": 0.0
+    },
+    "high_confidence": {
+        "enabled": True,
+        "min_confidence": 2,
+        "risk_multiplier": 1.3,
+        "add_leverage": 1,
+        "max_leverage": 4,
+        "max_risk_pct": 0.02
+    },
+    "defensive_after_losses": {
+        "enabled": True,
+        "consec_losses_trigger": 2,
+        "risk_multiplier": 0.5,
+        "leverage_reduction": 1,
+        "min_leverage": 1
     }
 }
 
@@ -65,25 +99,18 @@ def _si(v, default=0):
 
 
 def detect_regime_from_state(state: dict) -> str:
-    """
-    state 기반 시장 상태 추정
-    반환: bull / bear / neutral / range / unknown
-    """
     if not isinstance(state, dict):
         return "unknown"
 
     last_skip = str(state.get("last_skip_reason", "") or "").lower()
     raw_regime = str(state.get("regime", "") or state.get("last_regime", "") or "").lower()
-
     slope_bps = _sf(state.get("slope_bps", state.get("slope", 0.0)), 0.0)
     adx = _sf(state.get("adx", 0.0), 0.0)
 
     if "range" in last_skip or "side" in last_skip or "chop" in last_skip:
         return "range"
-
     if "range" in raw_regime or "side" in raw_regime or "chop" in raw_regime:
         return "range"
-
     if adx > 0 and adx < 18:
         return "range"
 
@@ -115,37 +142,36 @@ def apply_trader_ai_risk_leverage_patch(Trader):
         if not hasattr(self, "state") or not isinstance(self.state, dict):
             self.state = {}
 
-        self.state.setdefault("ai_mode", "unknown")
-        self.state.setdefault("ai_symbol", "unknown")
-        self.state.setdefault("ai_reason", "-")
-        self.state.setdefault("ai_regime", "unknown")
-
-        self.state.setdefault("daily_pnl_pct", 0.0)
-        self.state.setdefault("consec_losses", 0)
-        self.state.setdefault("recent_trade_results", [])
-        self.state.setdefault("risk_paused_until", 0.0)
-        self.state.setdefault("risk_active", True)
-
-        self.state.setdefault("risk_pct", 0.0)
-        self.state.setdefault("ai_leverage", 1)
+        defaults = {
+            "ai_mode": "unknown",
+            "ai_symbol": "unknown",
+            "ai_reason": "-",
+            "ai_regime": "unknown",
+            "ai_confidence": 0,
+            "daily_pnl_pct": 0.0,
+            "consec_losses": 0,
+            "recent_trade_results": [],
+            "risk_paused_until": 0.0,
+            "risk_active": True,
+            "risk_pct": 0.0,
+            "ai_leverage": 1,
+            "recovery_cooldown_ok": False,
+            "recovery_trend_ok": False,
+            "recovery_perf_ok": False,
+        }
+        for k, v in defaults.items():
+            self.state.setdefault(k, v)
 
     def _append_recent_trade_result(self, pnl_pct: float):
         arr = self.state.get("recent_trade_results", [])
         if not isinstance(arr, list):
             arr = []
         arr.append(float(pnl_pct))
-        arr = arr[-5:]
-        self.state["recent_trade_results"] = arr
+        self.state["recent_trade_results"] = arr[-5:]
 
     def _after_close_update_risk_ai(self, pnl_pct: float):
         risk = _load_json(RISK_LIMITS_PATH, DEFAULT_RISK)
-        now = time.time()
-
-        if not hasattr(self, "state") or not isinstance(self.state, dict):
-            self.state = {}
-
         self._append_recent_trade_result(pnl_pct)
-
         self.state["daily_pnl_pct"] = _sf(self.state.get("daily_pnl_pct", 0.0), 0.0) + float(pnl_pct)
 
         if pnl_pct > 0:
@@ -154,10 +180,9 @@ def apply_trader_ai_risk_leverage_patch(Trader):
             return
 
         self.state["consec_losses"] = _si(self.state.get("consec_losses", 0), 0) + 1
-
         if self.state["consec_losses"] >= int(risk["max_consec_losses"]):
             mins = int(risk["cooldown_minutes_after_loss"])
-            self.state["risk_paused_until"] = now + mins * 60
+            self.state["risk_paused_until"] = time.time() + mins * 60
             self.state["ai_reason"] = f"loss_pause:{mins}m"
 
     def _apply_best_config_ai(self):
@@ -191,13 +216,13 @@ def apply_trader_ai_risk_leverage_patch(Trader):
             "time_exit_bars": ["time_exit_bars", "TIME_EXIT_BARS"],
         }
 
-        for k, v in mapping.items():
-            if v is None:
+        for key, val in mapping.items():
+            if val is None:
                 continue
-            for attr in attr_candidates[k]:
+            for attr in attr_candidates[key]:
                 if hasattr(self, attr):
                     try:
-                        setattr(self, attr, v)
+                        setattr(self, attr, val)
                     except Exception:
                         pass
 
@@ -210,10 +235,55 @@ def apply_trader_ai_risk_leverage_patch(Trader):
         base_cfg = risk["regime_risk"].get(regime, risk["regime_risk"]["unknown"])
         mult = _sf(risk["mode_risk_multipliers"].get(mode, 1.0), 1.0)
 
-        risk_pct = round(_sf(base_cfg.get("risk_pct", 0.0), 0.0) * mult, 6)
+        risk_pct = _sf(base_cfg.get("risk_pct", 0.0), 0.0) * mult
         leverage = max(1, _si(base_cfg.get("leverage", 1), 1))
 
-        self.state["risk_pct"] = risk_pct
+        # confidence
+        confidence = 0
+        adx = _sf(self.state.get("adx", 0.0), 0.0)
+        slope_bps = _sf(self.state.get("slope_bps", self.state.get("slope", 0.0)), 0.0)
+        recent = self.state.get("recent_trade_results", [])
+        if not isinstance(recent, list):
+            recent = []
+        wins = sum(1 for x in recent[-5:] if _sf(x, 0.0) > 0)
+
+        if regime == "bull":
+            confidence += 1
+        if adx >= 25:
+            confidence += 1
+        if slope_bps >= 8.0:
+            confidence += 1
+        if wins >= 3:
+            confidence += 1
+
+        self.state["ai_confidence"] = confidence
+
+        hc = risk.get("high_confidence", {})
+        if hc.get("enabled", True) and confidence >= int(hc.get("min_confidence", 2)):
+            risk_pct *= _sf(hc.get("risk_multiplier", 1.3), 1.3)
+            leverage = min(
+                leverage + _si(hc.get("add_leverage", 1), 1),
+                _si(hc.get("max_leverage", 4), 4),
+            )
+            self.state["ai_reason"] = f"high_confidence:{confidence}"
+        else:
+            self.state["ai_reason"] = f"normal_confidence:{confidence}"
+
+        defensive = risk.get("defensive_after_losses", {})
+        consec_losses = _si(self.state.get("consec_losses", 0), 0)
+        if defensive.get("enabled", True) and consec_losses >= int(defensive.get("consec_losses_trigger", 2)):
+            risk_pct *= _sf(defensive.get("risk_multiplier", 0.5), 0.5)
+            leverage = max(
+                _si(defensive.get("min_leverage", 1), 1),
+                leverage - _si(defensive.get("leverage_reduction", 1), 1),
+            )
+            self.state["ai_reason"] += "|defensive"
+
+        max_risk_pct = _sf(hc.get("max_risk_pct", 0.02), 0.02)
+        risk_pct = max(0.0, min(risk_pct, max_risk_pct))
+        leverage = max(1, min(leverage, _si(hc.get("max_leverage", 4), 4)))
+
+        self.state["risk_pct"] = round(risk_pct, 6)
         self.state["ai_leverage"] = leverage
 
         symbol = self.state.get("ai_symbol", "NONE")
@@ -240,7 +310,7 @@ def apply_trader_ai_risk_leverage_patch(Trader):
         if not isinstance(recent, list):
             recent = []
         wins = sum(1 for x in recent[-5:] if _sf(x, 0.0) > 0)
-        perf_ok = wins >= int(risk.get("resume_min_wins_last5", 3))
+        perf_ok = wins >= int(risk.get("resume_min_wins_last5", 2))
 
         self.state["recovery_cooldown_ok"] = cooldown_ok
         self.state["recovery_trend_ok"] = trend_ok
@@ -252,7 +322,7 @@ def apply_trader_ai_risk_leverage_patch(Trader):
         risk = _load_json(RISK_LIMITS_PATH, DEFAULT_RISK)
 
         daily_pnl_pct = _sf(self.state.get("daily_pnl_pct", 0.0), 0.0)
-        if daily_pnl_pct <= _sf(risk["daily_loss_stop_pct"], -3.0):
+        if daily_pnl_pct <= _sf(risk["daily_loss_stop_pct"], -2.5):
             self.state["ai_reason"] = f"daily_stop:{daily_pnl_pct}"
             if hasattr(self, "trading_enabled"):
                 self.trading_enabled = False
@@ -288,7 +358,6 @@ def apply_trader_ai_risk_leverage_patch(Trader):
                         setattr(self, attr, self.state.get("risk_pct", 0.0))
                     except Exception:
                         pass
-
         except Exception as e:
             try:
                 self.state["ai_reason"] = f"ai_patch_err:{e}"
@@ -304,15 +373,14 @@ def apply_trader_ai_risk_leverage_patch(Trader):
             f"🎯 ai_symbol={self.state.get('ai_symbol', '-')}",
             f"🧠 ai_reason={self.state.get('ai_reason', '-')}",
             f"🌊 ai_regime={self.state.get('ai_regime', '-')}",
+            f"📊 ai_confidence={self.state.get('ai_confidence', '-')}",
             f"📉 consec_losses={self.state.get('consec_losses', '-')}",
             f"💸 daily_pnl_pct={self.state.get('daily_pnl_pct', '-')}",
             f"🛡️ risk_pct={self.state.get('risk_pct', '-')}",
             f"⚙️ ai_leverage={self.state.get('ai_leverage', '-')}",
             f"🔄 recovery_ok={self.state.get('recovery_cooldown_ok', '-')}/{self.state.get('recovery_trend_ok', '-')}/{self.state.get('recovery_perf_ok', '-')}",
         ]
-        if base:
-            return base + "\n" + "\n".join(extra)
-        return "\n".join(extra)
+        return (base + "\n" if base else "") + "\n".join(extra)
 
     Trader.__init__ = __init__patched
     if callable(orig_tick):
