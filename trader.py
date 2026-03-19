@@ -4102,3 +4102,36 @@ try:
 
 except Exception as e:
     print("AI PATCH FAIL:", e)
+# ===== LOAD BEST CONFIG PATCH =====
+try:
+    import json, os
+
+    def _load_best_config(self):
+        path = os.path.join(os.getcwd(), "best_config.json")
+        if not os.path.exists(path):
+            return
+
+        with open(path, "r") as f:
+            data = json.load(f)
+
+        best = data if isinstance(data, dict) else (data[0] if data else None)
+        if not best:
+            return
+
+        self.state["ai_symbol"] = best.get("symbol", "ETHUSDT")
+        self.state["ai_mode"] = best.get("mode", "long")
+        self.state["ai_reason"] = "best_config"
+
+    _orig_tick = getattr(Trader, "tick", None)
+
+    def _patched_tick2(self, *args, **kwargs):
+        try:
+            _load_best_config(self)
+        except:
+            pass
+        return _orig_tick(self, *args, **kwargs)
+
+    Trader.tick = _patched_tick2
+
+except:
+    pass
