@@ -4040,3 +4040,5 @@ except Exception as e:
     print("quant2 patch fail:", e)
 from trader_ai_runtime_patch import apply_trader_ai_runtime_patch
 apply_trader_ai_runtime_patch(Trader)
+from trader_ai_risk_leverage_patch import apply_trader_ai_risk_leverage_patch
+apply_trader_ai_risk_leverage_patch(Trader)
