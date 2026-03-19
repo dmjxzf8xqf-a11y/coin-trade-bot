@@ -4135,98 +4135,51 @@ try:
 
 except:
     pass
-# ===== AUTO COMPOUND POSITION SIZE =====
+
+# ===== SAFE RUNTIME PATCHES =====
 try:
-    wins = int(self.state.get("consec_wins", 0) or 0)
-    losses = int(self.state.get("consec_losses", 0) or 0)
+    import json as _rt_json
+    import os as _rt_os
 
-    base = 20  # 기본 주문금액 (네 기준)
-
-    if wins >= 3:
-        order_usdt = base * 2.0   # 40
-    elif wins == 2:
-        order_usdt = base * 1.5   # 30
-    elif wins == 1:
-        order_usdt = base * 1.2   # 24
-    else:
-        order_usdt = base
-
-    # 손실 시 리셋
-    if losses >= 1:
-        order_usdt = base * 0.8   # 16
-
-    # 계좌 보호 (최대 제한)
-    balance = float(self.state.get("balance", 200) or 200)
-    max_size = balance * 0.2   # 최대 20%
-
-    order_usdt = min(order_usdt, max_size)
-
-    self.state["order_usdt"] = round(order_usdt, 2)
-
-except:
-    pass
-# ===== FORCE LOAD BEST CONFIG =====
-try:
-    import json
-
-    with open("best_config.json", "r") as f:
-        cfg = json.load(f)
-
-    selected = cfg.get("selected", {})
-
-    self.state["ai_symbol"] = selected.get("symbol", "ETHUSDT")
-    self.state["ai_mode"] = selected.get("mode", "long")
-    self.state["ai_reason"] = "best_config"
-
-except:
-    pass
-# ===== FORCE APPLY BEST CONFIG TO STRATEGY =====
-try:
-    import json
-
-    with open("best_config.json", "r") as f:
-        cfg = json.load(f)
-
-    selected = cfg.get("selected", {})
-
-    symbol = selected.get("symbol", "ETHUSDT")
-    mode = selected.get("mode", "long")
-
-    # 핵심: router 강제 연결
-    self.fixed_symbol = symbol
-    self.auto_symbol = False
-
-    self.state["ai_symbol"] = symbol
-    self.state["ai_mode"] = mode
-    self.state["ai_reason"] = "best_config"
-
-except Exception as e:
-    print("BEST CONFIG LOAD FAIL:", e)
-cat >> /root/coin-trade-bot/trader.py <<'PY'
-
-# ===== FORCE FIX SYMBOL + STRATEGY =====
-try:
-    _orig_tick_fixsym = getattr(Trader, "tick", None)
-
-    def _fixsym_tick(self, *args, **kwargs):
+    def _apply_best_config_runtime(self):
         try:
-            # 강제 심볼 고정
-            self.fixed_symbol = "ETHUSDT"
+            path = _rt_os.path.join(_rt_os.getcwd(), "best_config.json")
+            if not _rt_os.path.exists(path):
+                return
+
+            with open(path, "r", encoding="utf-8") as f:
+                data = _rt_json.load(f)
+
+            if isinstance(data, dict):
+                selected = data.get("selected") if isinstance(data.get("selected"), dict) else data
+            elif isinstance(data, list) and data:
+                selected = data[0] if isinstance(data[0], dict) else {}
+            else:
+                selected = {}
+
+            symbol = str(selected.get("symbol", "") or "").upper().strip()
+            mode = str(selected.get("mode", "") or "").lower().strip()
+            if not symbol:
+                return
+
+            self.fixed_symbol = symbol
             self.auto_symbol = False
 
             if not hasattr(self, "state") or not isinstance(self.state, dict):
                 self.state = {}
-
-            self.state["ai_symbol"] = "ETHUSDT"
-            self.state["ai_mode"] = "long"
-            self.state["ai_reason"] = "forced_fix"
-        except:
+            self.state["ai_symbol"] = symbol
+            if mode:
+                self.state["ai_mode"] = mode
+            self.state["ai_reason"] = "best_config"
+        except Exception:
             pass
 
-        return _orig_tick_fixsym(self, *args, **kwargs)
+    _runtime_prev_tick = getattr(Trader, "tick", None)
+    if callable(_runtime_prev_tick):
+        def _runtime_tick(self, *args, **kwargs):
+            _apply_best_config_runtime(self)
+            return _runtime_prev_tick(self, *args, **kwargs)
 
-    Trader.tick = _fixsym_tick
-except Exception as e:
-    print("FIX SYMBOL PATCH FAIL:", e)
-
-PY
+        Trader.tick = _runtime_tick
+except Exception as _rt_e:
+    print("SAFE RUNTIME PATCH FAIL:", _rt_e)
