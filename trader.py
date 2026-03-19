@@ -4180,3 +4180,25 @@ try:
 
 except:
     pass
+# ===== FORCE APPLY BEST CONFIG TO STRATEGY =====
+try:
+    import json
+
+    with open("best_config.json", "r") as f:
+        cfg = json.load(f)
+
+    selected = cfg.get("selected", {})
+
+    symbol = selected.get("symbol", "ETHUSDT")
+    mode = selected.get("mode", "long")
+
+    # 핵심: router 강제 연결
+    self.fixed_symbol = symbol
+    self.auto_symbol = False
+
+    self.state["ai_symbol"] = symbol
+    self.state["ai_mode"] = mode
+    self.state["ai_reason"] = "best_config"
+
+except Exception as e:
+    print("BEST CONFIG LOAD FAIL:", e)
