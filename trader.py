@@ -1213,19 +1213,19 @@ class Trader:
 
     def _ensure_leverage(self, symbol: str):
         mp = self._mp()
-        key = f"{symbol}:{self.mode}:{mp['lev']}"
+        target_lev = int(mp["lev"])
+        key = f"{symbol}:{self.mode}:{target_lev}"
         if self._lev_set_cache.get(key):
             return
-        if not DRY_RUN:
-            try:
-                set_leverage(symbol, int(mp["lev"]))
-            except Exception as e:
-                # ✅ FIX 5: double-safe
-                msg = str(e)
-                if "110043" in msg or "leverage not modified" in msg.lower():
-                    pass
-                else:
-                    raise
+        if DRY_RUN:
+            self._lev_set_cache[key] = True
+            return
+        try:
+            set_leverage(symbol, target_lev)
+        except Exception as e:
+            msg = str(e)
+            if not _is_bybit_lev_not_modified("110043" if "110043" in msg else "", msg):
+                raise
         self._lev_set_cache[key] = True
 
     # ---------------- discovery ----------------
@@ -3972,6 +3972,10 @@ try:
             except Exception:
                 return base
         Trader.status_text = _status_text_stb
+
+except Exception as _stb_patch_err:
+    print(f"[STABILITY_PATCH] load failed: {_stb_patch_err}")
+
 # ===== LOG THROTTLE PATCH =====
 import time
 import logging
@@ -3998,8 +4002,6 @@ def safe_log(msg, key="default", sec=60):
         log_throttled(key, msg, sec)
     except Exception:
         print(msg)
-except Exception as _stb_e:
-    print(f"[STABILITY_PATCH_ERR] {_stb_e}")
 # ===== DEBUG LOG LIMIT PATCH =====
 import builtins
 import time
@@ -4022,3 +4024,424 @@ def _patched_print(*args, **kwargs):
     _orig_print(*args, **kwargs)
 
 builtins.print = _patched_print
+
+
+# === FINAL STABILITY PATCH (assistant) ===
+try:
+    _orig_reset_day_final = getattr(Trader, "_reset_day", None)
+    if callable(_orig_reset_day_final):
+        def _reset_day_final(self, *args, **kwargs):
+            _orig_reset_day_final(self, *args, **kwargs)
+            try:
+                if not hasattr(self, "state") or not isinstance(self.state, dict):
+                    self.state = {}
+                self.state["day_key"] = getattr(self, "_day_key", self.state.get("day_key"))
+                self.state["day_profit"] = float(getattr(self, "day_profit", 0.0) or 0.0)
+                self.state["win"] = int(getattr(self, "win", 0) or 0)
+                self.state["loss"] = int(getattr(self, "loss", 0) or 0)
+                self.state["consec_losses"] = int(getattr(self, "consec_losses", 0) or 0)
+            except Exception:
+                pass
+        Trader._reset_day = _reset_day_final
+except Exception:
+    pass
+
+try:
+    _orig_ensure_leverage_final = getattr(Trader, "_ensure_leverage", None)
+    if callable(_orig_ensure_leverage_final):
+        def _ensure_leverage_final(self, symbol: str):
+            try:
+                return _orig_ensure_leverage_final(self, symbol)
+            except Exception as e:
+                msg = str(e)
+                if _is_bybit_lev_not_modified("110043" if "110043" in msg else "", msg):
+                    try:
+                        mp = self._mp() if hasattr(self, "_mp") else {"lev": "?"}
+                        key = f"{symbol}:{getattr(self, 'mode', 'UNK')}:{int(mp.get('lev', 0) or 0)}"
+                        if hasattr(self, "_lev_set_cache") and isinstance(self._lev_set_cache, dict):
+                            self._lev_set_cache[key] = True
+                    except Exception:
+                        pass
+                    return
+                raise
+        Trader._ensure_leverage = _ensure_leverage_final
+except Exception:
+    pass
+
+
+# =====================================================================
+# ULTIMATE FUSION PATCH (assistant)
+# 목적:
+# - 기존 파일 기반으로 안정화 + 런타임 복구 + 포지션/상태 동기화 + 진입 중복 방지 + 실전 persistence 강화
+# - 기존 구조를 갈아엎지 않고, 맨 아래 monkey patch 방식으로만 덧댐
+# =====================================================================
+try:
+    import time as _uf_time
+    import json as _uf_json
+
+    _UF_RUNTIME_FILE = data_path("runtime_state_ultimate.json")
+    _UF_AUDIT_FILE = data_path("trade_audit.json")
+
+    def _uf_now():
+        return int(_uf_time.time())
+
+    def _uf_read_json(path, default):
+        try:
+            return safe_read_json(path, default)
+        except Exception:
+            return default
+
+    def _uf_write_json(path, payload):
+        try:
+            atomic_write_json(path, payload)
+        except Exception:
+            pass
+
+    def _uf_runtime_payload(self):
+        try:
+            return {
+                "ts": _uf_now(),
+                "mode": str(getattr(self, "mode", MODE_DEFAULT) or MODE_DEFAULT),
+                "trading_enabled": bool(getattr(self, "trading_enabled", True)),
+                "allow_long": bool(getattr(self, "allow_long", ALLOW_LONG_DEFAULT)),
+                "allow_short": bool(getattr(self, "allow_short", ALLOW_SHORT_DEFAULT)),
+                "auto_symbol": bool(getattr(self, "auto_symbol", AUTO_SYMBOL_DEFAULT)),
+                "fixed_symbol": str(getattr(self, "fixed_symbol", FIXED_SYMBOL_DEFAULT) or FIXED_SYMBOL_DEFAULT),
+                "auto_discovery": bool(getattr(self, "auto_discovery", AUTO_DISCOVERY_DEFAULT)),
+                "diversify": bool(getattr(self, "diversify", DIVERSIFY_DEFAULT)),
+                "max_positions": int(getattr(self, "max_positions", MAX_POSITIONS_DEFAULT) or MAX_POSITIONS_DEFAULT),
+                "symbols": list(getattr(self, "symbols", SYMBOLS_ENV) or []),
+                "ai_growth": bool(getattr(self, "ai_growth", AI_GROWTH_DEFAULT)),
+                "consec_losses": int(getattr(self, "consec_losses", 0) or 0),
+                "cooldown_until": float(getattr(self, "_cooldown_until", 0) or 0),
+                "day_key": str(getattr(self, "_day_key", "") or ""),
+                "day_profit": float(getattr(self, "day_profit", 0.0) or 0.0),
+                "win": int(getattr(self, "win", 0) or 0),
+                "loss": int(getattr(self, "loss", 0) or 0),
+                "day_entries": int(getattr(self, "_day_entries", 0) or 0),
+                "tune": dict(getattr(self, "tune", {}) or {}),
+                "avoid_low_rsi": bool((getattr(self, "state", {}) or {}).get("avoid_low_rsi", False)),
+                "last_skip_reason": str((getattr(self, "state", {}) or {}).get("last_skip_reason", "") or ""),
+                "last_event": str((getattr(self, "state", {}) or {}).get("last_event", "") or ""),
+            }
+        except Exception:
+            return {"ts": _uf_now()}
+
+    def _uf_sync_runtime(self, force=False):
+        try:
+            last = float(getattr(self, "_uf_last_runtime_sync", 0) or 0)
+            if (not force) and (_uf_time.time() - last < 15):
+                return
+            self._uf_last_runtime_sync = _uf_time.time()
+            _uf_write_json(_UF_RUNTIME_FILE, _uf_runtime_payload(self))
+        except Exception:
+            pass
+
+    def _uf_append_audit(kind: str, payload: dict):
+        try:
+            arr = _uf_read_json(_UF_AUDIT_FILE, [])
+            if not isinstance(arr, list):
+                arr = []
+            row = {"ts": _uf_now(), "kind": kind}
+            try:
+                row.update(dict(payload or {}))
+            except Exception:
+                pass
+            arr.append(row)
+            arr = arr[-200:]
+            _uf_write_json(_UF_AUDIT_FILE, arr)
+        except Exception:
+            pass
+
+    def _uf_real_symbol_side_set():
+        out = set()
+        try:
+            for p in get_positions_all() or []:
+                try:
+                    size = float(p.get("size") or 0)
+                    if size <= 0:
+                        continue
+                    sym = str(p.get("symbol") or "").upper()
+                    side = "LONG" if str(p.get("side") or "") == "Buy" else "SHORT"
+                    out.add((sym, side))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return out
+
+    def _uf_real_symbol_any(symbol: str) -> bool:
+        try:
+            symbol = str(symbol or "").upper()
+            for p in get_positions_all() or []:
+                try:
+                    if str(p.get("symbol") or "").upper() != symbol:
+                        continue
+                    if float(p.get("size") or 0) > 0:
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
+    def _uf_is_lev_not_modified(err) -> bool:
+        msg = str(err or "")
+        return ("110043" in msg) or ("leverage not modified" in msg.lower()) or ("set leverage not modified" in msg.lower())
+
+    _uf_prev_init = getattr(Trader, "__init__", None)
+    if callable(_uf_prev_init):
+        def _uf_init(self, state=None):
+            _uf_prev_init(self, state)
+            rt = _uf_read_json(_UF_RUNTIME_FILE, {})
+            try:
+                if isinstance(rt, dict) and rt:
+                    self.mode = str(rt.get("mode") or getattr(self, "mode", MODE_DEFAULT)).upper()
+                    self.trading_enabled = bool(rt.get("trading_enabled", getattr(self, "trading_enabled", True)))
+                    self.allow_long = bool(rt.get("allow_long", getattr(self, "allow_long", ALLOW_LONG_DEFAULT)))
+                    self.allow_short = bool(rt.get("allow_short", getattr(self, "allow_short", ALLOW_SHORT_DEFAULT)))
+                    self.auto_symbol = bool(rt.get("auto_symbol", getattr(self, "auto_symbol", AUTO_SYMBOL_DEFAULT)))
+                    self.fixed_symbol = str(rt.get("fixed_symbol") or getattr(self, "fixed_symbol", FIXED_SYMBOL_DEFAULT)).upper()
+                    self.auto_discovery = bool(rt.get("auto_discovery", getattr(self, "auto_discovery", AUTO_DISCOVERY_DEFAULT)))
+                    self.diversify = bool(rt.get("diversify", getattr(self, "diversify", DIVERSIFY_DEFAULT)))
+                    self.max_positions = int(rt.get("max_positions", getattr(self, "max_positions", MAX_POSITIONS_DEFAULT)) or 1)
+                    syms = rt.get("symbols") or []
+                    if isinstance(syms, list) and syms:
+                        self.symbols = [str(x).upper() for x in syms if str(x).strip()]
+                    tune = rt.get("tune") or {}
+                    if isinstance(tune, dict) and tune:
+                        self.tune.update(tune)
+                    self.ai_growth = bool(rt.get("ai_growth", getattr(self, "ai_growth", AI_GROWTH_DEFAULT)))
+                    self.consec_losses = int(rt.get("consec_losses", getattr(self, "consec_losses", 0)) or 0)
+                    self._cooldown_until = float(rt.get("cooldown_until", getattr(self, "_cooldown_until", 0)) or 0)
+                    self._day_key = rt.get("day_key") or getattr(self, "_day_key", None)
+                    self.day_profit = float(rt.get("day_profit", getattr(self, "day_profit", 0.0)) or 0.0)
+                    self.win = int(rt.get("win", getattr(self, "win", 0)) or 0)
+                    self.loss = int(rt.get("loss", getattr(self, "loss", 0)) or 0)
+                    self._day_entries = int(rt.get("day_entries", getattr(self, "_day_entries", 0)) or 0)
+                    if not hasattr(self, "state") or not isinstance(self.state, dict):
+                        self.state = {}
+                    self.state["avoid_low_rsi"] = bool(rt.get("avoid_low_rsi", self.state.get("avoid_low_rsi", False)))
+                    if rt.get("last_skip_reason"):
+                        self.state["last_skip_reason"] = str(rt.get("last_skip_reason"))
+                    if rt.get("last_event"):
+                        self.state["last_event"] = str(rt.get("last_event"))
+            except Exception:
+                pass
+            self._uf_last_runtime_sync = 0.0
+            self._uf_last_reconcile = 0.0
+            self._uf_last_auto_resume = 0.0
+            self._uf_entry_dedupe = {}
+            self._uf_last_health = 0.0
+            _uf_sync_runtime(self, force=True)
+        Trader.__init__ = _uf_init
+
+    _uf_prev_reset_day = getattr(Trader, "_reset_day", None)
+    if callable(_uf_prev_reset_day):
+        def _uf_reset_day(self, *args, **kwargs):
+            rv = _uf_prev_reset_day(self, *args, **kwargs)
+            try:
+                if not hasattr(self, "state") or not isinstance(self.state, dict):
+                    self.state = {}
+                self.state["day_key"] = getattr(self, "_day_key", self.state.get("day_key"))
+                self.state["day_profit"] = float(getattr(self, "day_profit", 0.0) or 0.0)
+                self.state["win"] = int(getattr(self, "win", 0) or 0)
+                self.state["loss"] = int(getattr(self, "loss", 0) or 0)
+                self.state["consec_losses"] = int(getattr(self, "consec_losses", 0) or 0)
+            except Exception:
+                pass
+            _uf_sync_runtime(self, force=True)
+            return rv
+        Trader._reset_day = _uf_reset_day
+
+    _uf_prev_ensure_leverage = getattr(Trader, "_ensure_leverage", None)
+    if callable(_uf_prev_ensure_leverage):
+        def _uf_ensure_leverage(self, symbol: str):
+            try:
+                return _uf_prev_ensure_leverage(self, symbol)
+            except Exception as e:
+                if _uf_is_lev_not_modified(e):
+                    try:
+                        mp = self._mp() if hasattr(self, "_mp") else {"lev": 0}
+                        key = f"{str(symbol).upper()}:{getattr(self, 'mode', 'UNK')}:{int((mp or {}).get('lev', 0) or 0)}"
+                        if not hasattr(self, "_lev_set_cache") or not isinstance(self._lev_set_cache, dict):
+                            self._lev_set_cache = {}
+                        self._lev_set_cache[key] = True
+                        self.state["last_lev_result"] = "IGNORED_110043"
+                    except Exception:
+                        pass
+                    return
+                raise
+        Trader._ensure_leverage = _uf_ensure_leverage
+
+    _uf_prev_handle = getattr(Trader, "handle_command", None)
+    if callable(_uf_prev_handle):
+        def _uf_handle(self, text: str):
+            cmd = str(text or "").strip().lower()
+            if cmd in ("/runtime", "/state"):
+                rt = _uf_runtime_payload(self)
+                self.notify("📦 runtime\n" + _uf_json.dumps(rt, ensure_ascii=False, indent=2)[:3500])
+                return
+            if cmd in ("/audit", "/trades"):
+                arr = _uf_read_json(_UF_AUDIT_FILE, [])
+                if not arr:
+                    self.notify("📒 audit 비어있음")
+                else:
+                    tail = arr[-8:]
+                    lines = ["📒 recent audit"]
+                    for r in tail:
+                        lines.append(f"- {r.get('kind')} {r.get('symbol','')} {r.get('side','')} pnl={r.get('pnl','-')} why={r.get('why','-')}")
+                    self.notify("\n".join(lines))
+                return
+            if cmd in ("/forcesync", "/fullsync"):
+                try:
+                    if ' _adv_reconcile' != '_adv_reconcile':
+                        pass
+                except Exception:
+                    pass
+                try:
+                    if '_adv_reconcile' in globals() and callable(globals().get('_adv_reconcile')):
+                        globals()['_adv_reconcile'](self, notify=True)
+                    elif hasattr(self, '_reconcile_positions_safe') and callable(self._reconcile_positions_safe):
+                        self._reconcile_positions_safe(notify=True)
+                    self.notify("✅ force sync 완료")
+                except Exception as e:
+                    self.notify(f"❌ force sync 실패: {e}")
+                _uf_sync_runtime(self, force=True)
+                return
+            rv = _uf_prev_handle(self, text)
+            try:
+                if cmd.startswith("/safe") or cmd.startswith("/aggro") or cmd.startswith("/attack"):
+                    self._lev_set_cache = {}
+                if cmd.startswith("/setsymbol"):
+                    self.auto_symbol = False
+                if cmd.startswith("/setlev"):
+                    self._lev_set_cache = {}
+            except Exception:
+                pass
+            _uf_sync_runtime(self, force=True)
+            return rv
+        Trader.handle_command = _uf_handle
+
+    _uf_prev_enter = getattr(Trader, "_enter", None)
+    if callable(_uf_prev_enter):
+        def _uf_enter(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float, strategy: str = "", score: float = 0.0, atr: float = 0.0, *args, **kwargs):
+            symbol = str(symbol or "").upper()
+            side = str(side or "").upper()
+            now = _uf_time.time()
+            try:
+                self._uf_entry_dedupe = getattr(self, "_uf_entry_dedupe", {}) or {}
+            except Exception:
+                self._uf_entry_dedupe = {}
+            last = float(self._uf_entry_dedupe.get((symbol, side), 0) or 0)
+            if now - last < 20:
+                try:
+                    self.state["last_skip_reason"] = f"UF_DEDUPE:{symbol}:{side}"
+                except Exception:
+                    pass
+                return None
+            # 내부 포지션 중복 차단
+            try:
+                for p in list(getattr(self, "positions", []) or []):
+                    if str(p.get("symbol") or "").upper() == symbol:
+                        try:
+                            self.state["last_skip_reason"] = f"UF_HAVE_INTERNAL:{symbol}"
+                        except Exception:
+                            pass
+                        return None
+            except Exception:
+                pass
+            # 실거래 포지션 중복 차단
+            if (not DRY_RUN) and _uf_real_symbol_any(symbol):
+                try:
+                    self.state["last_skip_reason"] = f"UF_HAVE_REAL:{symbol}"
+                except Exception:
+                    pass
+                return None
+            rv = _uf_prev_enter(self, symbol, side, price, reason, sl, tp, strategy, score, atr, *args, **kwargs)
+            self._uf_entry_dedupe[(symbol, side)] = now
+            try:
+                self.state["last_event"] = f"UF_ENTER {symbol} {side}"
+            except Exception:
+                pass
+            _uf_append_audit("enter", {
+                "symbol": symbol,
+                "side": side,
+                "price": float(price or 0),
+                "strategy": str(strategy or ""),
+                "score": float(score or 0),
+            })
+            _uf_sync_runtime(self, force=True)
+            return rv
+        Trader._enter = _uf_enter
+
+    _uf_prev_exit = getattr(Trader, "_exit_position", None)
+    if callable(_uf_prev_exit):
+        def _uf_exit(self, idx: int, why: str, force=False):
+            pos = None
+            try:
+                if 0 <= idx < len(getattr(self, "positions", []) or []):
+                    pos = dict((self.positions or [])[idx])
+            except Exception:
+                pos = None
+            rv = _uf_prev_exit(self, idx, why, force=force)
+            try:
+                _uf_append_audit("exit", {
+                    "symbol": (pos or {}).get("symbol", ""),
+                    "side": (pos or {}).get("side", ""),
+                    "why": str(why or ""),
+                    "strategy": (pos or {}).get("strategy", ""),
+                    "pnl": float((getattr(self, "day_profit", 0.0) or 0.0)),
+                })
+            except Exception:
+                pass
+            _uf_sync_runtime(self, force=True)
+            return rv
+        Trader._exit_position = _uf_exit
+
+    _uf_prev_tick = getattr(Trader, "tick", None)
+    if callable(_uf_prev_tick):
+        def _uf_tick(self, *args, **kwargs):
+            now = _uf_time.time()
+            # 자동 재개: circuit breaker cooldown 끝나면 다시 ON
+            try:
+                if (not bool(getattr(self, "trading_enabled", True))) and float(getattr(self, "_cooldown_until", 0) or 0) > 0:
+                    if now >= float(getattr(self, "_cooldown_until", 0) or 0):
+                        if now - float(getattr(self, "_uf_last_auto_resume", 0) or 0) > 30:
+                            self.trading_enabled = True
+                            self._cb_err_count = 0
+                            self._cooldown_until = 0
+                            self._uf_last_auto_resume = now
+                            try:
+                                self.notify_throttled("✅ cooldown 종료 → 거래 자동 재개", 60)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+            # 주기적 실포지션 동기화
+            try:
+                if (not DRY_RUN) and (now - float(getattr(self, "_uf_last_reconcile", 0) or 0) >= 45):
+                    if '_adv_reconcile' in globals() and callable(globals().get('_adv_reconcile')):
+                        globals()['_adv_reconcile'](self, notify=False)
+                    self._uf_last_reconcile = now
+            except Exception:
+                pass
+            rv = _uf_prev_tick(self, *args, **kwargs)
+            # 내부 ghost 정리 보조
+            try:
+                if (not DRY_RUN) and len(getattr(self, "positions", []) or []) > 0:
+                    real_keys = _uf_real_symbol_side_set()
+                    removed = 0
+                    for i in range(len(self.positions) - 1, -1, -1):
+                        p = self.positions[i]
+                        key = (str(p.get("symbol") or "").upper(), str(p.get("side") or "").upper())
+                        if key not in real_keys and p.get("ghost_closed"):
+                            self.positions.pop(i)
+                            removed += 1
+                    if removed:
+                        self.state["last_event"] = f"UF_GHOST_CLEANUP:{removed}"
+            except Exception:
+                pass
+            _uf_sync_runtime(self, force=False)
+            return rv
+        Trader.tick = _uf
