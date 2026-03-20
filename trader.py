@@ -4445,6 +4445,8 @@ try:
             _uf_sync_runtime(self, force=False)
             return rv
         Trader.tick = _uf
+except Exception as e:
+    print("ULTIMATE FUSION PATCH FAIL:", e)
 # =========================
 # 🔥 AI CAPITAL MANAGER
 # =========================
