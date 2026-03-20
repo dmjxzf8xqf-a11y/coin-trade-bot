@@ -4445,3 +4445,114 @@ try:
             _uf_sync_runtime(self, force=False)
             return rv
         Trader.tick = _uf
+# =========================
+# 🔥 AI CAPITAL MANAGER
+# =========================
+
+try:
+    if not hasattr(Trader, "_ai_capital"):
+        Trader._ai_capital = {
+            "size_mult": 1.0,
+            "lev": 15,
+            "win_streak": 0,
+            "lose_streak": 0
+        }
+
+    def _ai_adjust(self, pnl):
+        cap = self._ai_capital
+
+        if pnl > 0:
+            cap["win_streak"] += 1
+            cap["lose_streak"] = 0
+            cap["size_mult"] = min(cap["size_mult"] * 1.1, 2.0)
+            cap["lev"] = min(cap["lev"] + 1, 30)
+
+        else:
+            cap["lose_streak"] += 1
+            cap["win_streak"] = 0
+            cap["size_mult"] = max(cap["size_mult"] * 0.8, 0.3)
+            cap["lev"] = max(cap["lev"] - 2, 5)
+
+    # ---------- entry hook ----------
+    _orig_entry = getattr(Trader, "_entry", None)
+
+    if callable(_orig_entry):
+        def _patched_entry(self, symbol, *args, **kwargs):
+            cap = self._ai_capital
+
+            # 비중 조절
+            if "qty" in kwargs:
+                kwargs["qty"] *= cap["size_mult"]
+
+            # 레버리지 적용
+            if hasattr(self, "mode"):
+                if not hasattr(self, "_mp"):
+                    pass
+                else:
+                    try:
+                        mp = self._mp()
+                        mp["lev"] = cap["lev"]
+                    except:
+                        pass
+
+            return _orig_entry(self, symbol, *args, **kwargs)
+
+        Trader._entry = _patched_entry
+
+    # ---------- exit hook ----------
+    _orig_exit = getattr(Trader, "_exit_position", None)
+
+    if callable(_orig_exit):
+        def _patched_exit(self, idx, why, *a, **k):
+            try:
+                pos = self.positions[idx]
+                entry = pos.get("entry_price", 0)
+                price = self._get_price(pos["symbol"])
+                pnl = (price - entry) * pos.get("qty", 0)
+                if pos.get("side") == "SHORT":
+                    pnl *= -1
+
+                self._ai_adjust(pnl)
+            except:
+                pass
+
+            return _orig_exit(self, idx, why, *a, **k)
+
+        Trader._exit_position = _patched_exit
+
+except Exception as e:
+    print("AI CAPITAL PATCH FAIL:", e)
+# =========================
+# 🔥 CIRCUIT BREAKER AUTO RECOVER PATCH
+# =========================
+
+try:
+    _orig_tick_cb = getattr(Trader, "tick", None)
+
+    if callable(_orig_tick_cb):
+        def _patched_tick_cb(self, *args, **kwargs):
+
+            # --- cooldown 끝났으면 자동 복구 ---
+            try:
+                now_ts = time.time()
+
+                if hasattr(self, "_cooldown_until"):
+                    if self._cooldown_until and now_ts >= self._cooldown_until:
+                        if hasattr(self, "trading_enabled") and not self.trading_enabled:
+                            self.trading_enabled = True
+                            self._cooldown_until = 0
+
+                            try:
+                                self._notify("🔄 Circuit Breaker 자동 복구됨")
+                            except:
+                                pass
+
+            except Exception as e:
+                print("CB AUTO RECOVER ERROR:", e)
+
+            return _orig_tick_cb(self, *args, **kwargs)
+
+        Trader.tick = _patched_tick_cb
+
+except Exception as e:
+    print("CB PATCH FAIL:", e)
