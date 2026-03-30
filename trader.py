@@ -4656,3 +4656,280 @@ except Exception:
     pass
 
 # === END AI UPGRADE PATCH ===
+# === AI STATUS PATCH ===
+try:
+    from online_learning import get_learning_state
+except Exception:
+    get_learning_state = None
+
+try:
+    _orig_status_ai = getattr(Trader, "status_text", None)
+
+    if callable(_orig_status_ai):
+        def _status_text_ai(self, *args, **kwargs):
+            text = _orig_status_ai(self, *args, **kwargs)
+
+            try:
+                lines = []
+
+                # learning 상태
+                if get_learning_state:
+                    st = get_learning_state()
+                    lines.append(
+                        f"🤖 AI trades={st.get('count')} "
+                        f"winrate={st.get('winrate')} "
+                        f"factor={st.get('factor')}"
+                    )
+
+                # leverage 상태
+                lev = getattr(self, "ai_leverage", None)
+                if lev:
+                    lines.append(f"⚡ AI leverage={lev}x")
+
+                # 마지막 skip 이유
+                last_skip = getattr(self, "state", {}).get("last_skip_reason", None)
+                if last_skip:
+                    lines.append(f"⛔ skip={last_skip}")
+
+                if lines:
+                    text += "\n" + "\n".join(lines)
+
+            except Exception:
+                pass
+
+            return text
+
+        Trader.status_text = _status_text_ai
+
+except Exception:
+    pass
+
+# === END AI STATUS PATCH ===
+# === MULTI-COIN PORTFOLIO AI PATCH ===
+
+try:
+    from symbol_weight import get_symbol_weight
+except Exception:
+    get_symbol_weight = None
+
+try:
+    _orig_enter_port_ai = getattr(Trader, "_enter", None)
+
+    if callable(_orig_enter_port_ai):
+        def _enter_port_ai(self, symbol, side, *args, **kwargs):
+            try:
+                state = getattr(self, "state", {})
+                if not isinstance(state, dict):
+                    state = {}
+
+                # 현재 열려있는 포지션 수 추정
+                open_count = 0
+                open_symbols = []
+
+                positions_obj = getattr(self, "positions", None)
+                if isinstance(positions_obj, dict):
+                    for k, v in positions_obj.items():
+                        try:
+                            qty = 0.0
+                            if isinstance(v, dict):
+                                qty = abs(float(v.get("qty", 0) or 0))
+                            if qty > 0:
+                                open_count += 1
+                                open_symbols.append(str(k).upper())
+                        except Exception:
+                            continue
+
+                # fallback
+                if open_count == 0:
+                    try:
+                        plist = getattr(self, "position", {}) or {}
+                        if isinstance(plist, dict) and abs(float(plist.get("qty", 0) or 0)) > 0:
+                            open_count = 1
+                            open_symbols = [str(symbol).upper()]
+                    except Exception:
+                        pass
+
+                # 최대 동시 포지션
+                try:
+                    max_pos = int(getattr(self, "max_positions", 0) or 0)
+                except Exception:
+                    max_pos = 0
+                if max_pos <= 0:
+                    try:
+                        import os as _os
+                        max_pos = int(_os.getenv("MAX_POSITIONS", "3"))
+                    except Exception:
+                        max_pos = 3
+
+                # 이미 꽉 찼으면 진입 차단
+                if open_count >= max_pos:
+                    state["last_skip_reason"] = f"MAX_POSITIONS_REACHED:{open_count}/{max_pos}"
+                    self.state = state
+                    return
+
+                # 기본 주문 크기 가져오기
+                mp = {}
+                if hasattr(self, "_mp") and callable(getattr(self, "_mp")):
+                    try:
+                        mp = self._mp() or {}
+                    except Exception:
+                        mp = {}
+                if not isinstance(mp, dict):
+                    mp = {}
+
+                base_usdt = float(mp.get("order_usdt", 0) or 0)
+                if base_usdt <= 0:
+                    base_usdt = float(getattr(self, "order_usdt", 0) or 0)
+
+                # 포지션이 많을수록 자동 축소
+                # 예: 0개=100%, 1개=85%, 2개=70%, 3개+=55%
+                if open_count <= 0:
+                    diversify_factor = 1.00
+                elif open_count == 1:
+                    diversify_factor = 0.85
+                elif open_count == 2:
+                    diversify_factor = 0.70
+                else:
+                    diversify_factor = 0.55
+
+                # 종목별 weight 반영
+                weight = 1.0
+                if get_symbol_weight:
+                    try:
+                        weight = float(get_symbol_weight(str(symbol).upper()))
+                    except Exception:
+                        weight = 1.0
+
+                new_usdt = max(1.0, float(base_usdt) * float(diversify_factor) * float(weight))
+                mp["order_usdt"] = new_usdt
+
+                # 상태 저장
+                state["portfolio_open_count"] = open_count
+                state["portfolio_max_positions"] = max_pos
+                state["portfolio_diversify_factor"] = round(diversify_factor, 4)
+                state["portfolio_symbol_weight"] = round(weight, 4)
+                state["portfolio_order_usdt"] = round(new_usdt, 4)
+                state["portfolio_open_symbols"] = ",".join(open_symbols[:10]) if open_symbols else "NONE"
+                self.state = state
+
+            except Exception as e:
+                try:
+                    self.err_throttled(f"PORT_AI_ERR {e}")
+                except Exception:
+                    pass
+
+            return _orig_enter_port_ai(self, symbol, side, *args, **kwargs)
+
+        Trader._enter = _enter_port_ai
+
+except Exception:
+    pass
+
+
+# === PORTFOLIO STATUS PATCH ===
+
+try:
+    _orig_status_port_ai = getattr(Trader, "status_text", None)
+
+    if callable(_orig_status_port_ai):
+        def _status_text_port_ai(self, *args, **kwargs):
+            text = _orig_status_port_ai(self, *args, **kwargs)
+
+            try:
+                st = getattr(self, "state", {})
+                if not isinstance(st, dict):
+                    st = {}
+
+                oc = st.get("portfolio_open_count", None)
+                mp = st.get("portfolio_max_positions", None)
+                df = st.get("portfolio_diversify_factor", None)
+                sw = st.get("portfolio_symbol_weight", None)
+                ou = st.get("portfolio_order_usdt", None)
+                osyms = st.get("portfolio_open_symbols", None)
+
+                extra = []
+                if oc is not None and mp is not None:
+                    extra.append(f"📊 PORT {oc}/{mp}")
+                if df is not None:
+                    extra.append(f"📉 div_factor={df}")
+                if sw is not None:
+                    extra.append(f"⚖️ sym_weight={sw}")
+                if ou is not None:
+                    extra.append(f"💵 port_usdt={ou}")
+                if osyms:
+                    extra.append(f"🧺 open={osyms}")
+
+                if extra:
+                    text += "\n" + "\n".join(extra)
+
+            except Exception:
+                pass
+
+            return text
+
+        Trader.status_text = _status_text_port_ai
+
+except Exception:
+    pass
+
+# === END MULTI-COIN PORTFOLIO AI PATCH ===
+# === DOCTOR PATCH ===
+
+try:
+    _orig_handle_cmd = getattr(Trader, "handle_telegram_command", None)
+
+    if callable(_orig_handle_cmd):
+        def _handle_cmd_doctor(self, text, *args, **kwargs):
+
+            if isinstance(text, str) and text.strip().lower() == "/doctor":
+                try:
+                    lines = []
+                    lines.append("🩺 BOT DOCTOR")
+
+                    # 기본 상태
+                    lines.append(f"RUNNING: True")
+
+                    # leverage
+                    lev = getattr(self, "ai_leverage", None)
+                    if lev:
+                        lines.append(f"LEVERAGE_AI: {lev}x")
+
+                    # last skip
+                    last_skip = getattr(self, "state", {}).get("last_skip_reason", None)
+                    if last_skip:
+                        lines.append(f"LAST_SKIP: {last_skip}")
+
+                    # 포지션 수
+                    oc = getattr(self, "state", {}).get("portfolio_open_count", None)
+                    if oc is not None:
+                        lines.append(f"OPEN_POS: {oc}")
+
+                    # learning factor
+                    try:
+                        from online_learning import get_learning_state
+                        st = get_learning_state()
+                        lines.append(f"AI_TRADES: {st.get('count')}")
+                        lines.append(f"AI_WINRATE: {st.get('winrate')}")
+                    except Exception:
+                        pass
+
+                    msg = "\n".join(lines)
+
+                    try:
+                        self.tg_send(msg)
+                    except Exception:
+                        pass
+
+                    return
+
+                except Exception:
+                    pass
+
+            return _orig_handle_cmd(self, text, *args, **kwargs)
+
+        Trader.handle_telegram_command = _handle_cmd_doctor
+
+except Exception:
+    pass
+
+# === END DOCTOR PATCH ===
