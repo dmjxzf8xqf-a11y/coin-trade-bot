@@ -4558,3 +4558,101 @@ try:
 
 except Exception as e:
     print("CB PATCH FAIL:", e)
+# === AI UPGRADE PATCH (LEVERAGE / CORRELATION / SLIPPAGE / ONLINE LEARNING) ===
+
+try:
+    from leverage_ai import calc_leverage
+    from correlation_filter import is_correlated
+    from slippage_ai import get_slippage_factor, is_slippage_too_high, record_slippage
+    from online_learning import get_learning_factor, record_trade
+except Exception:
+    calc_leverage = None
+    is_correlated = None
+    get_slippage_factor = None
+    is_slippage_too_high = None
+    record_slippage = None
+    record_trade = None
+
+
+try:
+    _orig_enter_ai = getattr(Trader, "_enter", None)
+
+    if callable(_orig_enter_ai):
+        def _enter_ai(self, symbol, side, *args, **kwargs):
+
+            try:
+                # === correlation filter ===
+                if is_correlated and hasattr(self, "positions"):
+                    open_pos = list(getattr(self, "positions", {}).keys())
+                    if is_correlated(symbol, open_pos):
+                        self.state["last_skip_reason"] = "CORRELATION_BLOCK"
+                        return
+
+                # === slippage filter ===
+                if is_slippage_too_high and is_slippage_too_high():
+                    self.state["last_skip_reason"] = "SLIPPAGE_TOO_HIGH"
+                    return
+
+                # === online learning factor ===
+                learn_factor = 1.0
+                if get_learning_factor:
+                    learn_factor = float(get_learning_factor())
+
+                # === slippage factor ===
+                slip_factor = 1.0
+                if get_slippage_factor:
+                    slip_factor = float(get_slippage_factor())
+
+                # === apply order size ===
+                if hasattr(self, "_mp"):
+                    mp = self._mp()
+                    if isinstance(mp, dict):
+                        base_usdt = float(mp.get("order_usdt", 0))
+                        new_usdt = base_usdt * learn_factor * slip_factor
+                        mp["order_usdt"] = max(1, new_usdt)
+
+                # === leverage AI ===
+                if calc_leverage:
+                    volatility = getattr(self, "last_volatility", 0.02)
+                    lev = calc_leverage(volatility)
+                    setattr(self, "ai_leverage", lev)
+
+            except Exception as e:
+                try:
+                    self.err_throttled(f"AI_PATCH_ERR {e}")
+                except Exception:
+                    pass
+
+            return _orig_enter_ai(self, symbol, side, *args, **kwargs)
+
+        Trader._enter = _enter_ai
+
+except Exception:
+    pass
+
+
+# === PNL RECORD PATCH ===
+
+try:
+    _orig_close_ai = getattr(Trader, "_close_position", None)
+
+    if callable(_orig_close_ai):
+        def _close_position_ai(self, *args, **kwargs):
+
+            result = _orig_close_ai(self, *args, **kwargs)
+
+            try:
+                pnl = getattr(self, "last_pnl", None)
+                if pnl is not None and record_trade:
+                    record_trade(float(pnl))
+            except Exception:
+                pass
+
+            return result
+
+        Trader._close_position = _close_position_ai
+
+except Exception:
+    pass
+
+# === END AI UPGRADE PATCH ===
