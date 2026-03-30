@@ -1,21 +1,45 @@
-def calc_position_size(balance, risk_pct, entry, stop, leverage):
+import os
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def calc_position_size(*args):
     """
-    balance   : 계좌 잔고
-    risk_pct  : 한 거래 리스크 (%)
-    entry     : 진입 가격
-    stop      : 손절 가격
-    leverage  : 레버리지
+    Supports both signatures used across repo:
+    1) calc_position_size(balance, risk_pct, entry, stop, leverage)
+    2) calc_position_size(symbol, entry, balance, leverage)
+    Returns qty.
     """
+    if len(args) == 5:
+        balance, risk_pct, entry, stop, leverage = args
+        balance = float(balance or 0)
+        risk_pct = float(risk_pct or 0)
+        entry = float(entry or 0)
+        stop = float(stop or 0)
+        leverage = float(leverage or 0)
+        stop_distance = abs(entry - stop)
+        if balance <= 0 or entry <= 0 or leverage <= 0 or stop_distance <= 0:
+            return 0.0
+        risk_amount = balance * (risk_pct / 100.0)
+        qty = (risk_amount / stop_distance) * leverage
+        return max(0.0, qty)
 
-    risk_amount = balance * (risk_pct / 100)
+    if len(args) == 4:
+        _symbol, entry, balance, leverage = args
+        entry = float(entry or 0)
+        balance = float(balance or 0)
+        leverage = float(leverage or 0)
+        if balance <= 0 or entry <= 0 or leverage <= 0:
+            return 0.0
+        risk_pct = float(os.getenv("RISK_PCT", "1.0"))
+        stop_atr_mult = float(os.getenv("RISK_STOP_PCT", "0.02"))
+        risk_amount = balance * (risk_pct / 100.0)
+        stop_distance = entry * stop_atr_mult
+        if stop_distance <= 0:
+            return 0.0
+        qty = (risk_amount / stop_distance) * leverage
+        return max(0.0, qty)
 
-    stop_distance = abs(entry - stop)
-    if stop_distance == 0:
-        return 0
-
-    qty = risk_amount / stop_distance
-
-    # 레버리지 반영
-    qty = qty * leverage
-
-    return qty
+    raise TypeError(f"unsupported calc_position_size args: {len(args)}")
