@@ -26,6 +26,7 @@ except Exception:
 load_dotenv()
 
 import trader as trader_module
+import ai_score_runtime_patch  # noqa: F401
 from trader import Trader
 
 
