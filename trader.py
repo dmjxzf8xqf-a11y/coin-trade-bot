@@ -2495,11 +2495,11 @@ def _final10_reconcile_into_internal(self):
             })
             imported += 1
 
-if imported > 0 and not getattr(self, "_import_once", False):
-    self.notify_throttled(f"🔄 실계정 포지션 {imported}개 자동-import 완료 (재시작/불일치 복구)")
-    self._import_once = True
-    except Exception as e:
-        self.state["reconcile_error"] = str(e)
+            if imported > 0 and not getattr(self, "_import_once", False):
+                self.notify_throttled(f"🔄 실계정 포지션 {imported}개 자동-import 완료 (재시작/불일치 복구)")
+                self._import_once = True
+        except Exception as e:
+            self.state["reconcile_error"] = str(e)
 
 def _final10_corr_guard_block(self, symbol: str):
     if not (CORR_GUARD_ON and _FINAL10_CORR_GROUPS):
