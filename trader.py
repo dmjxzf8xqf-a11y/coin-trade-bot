@@ -4932,3 +4932,478 @@ except Exception:
     pass
 
 # === END DOCTOR PATCH ===
+# =========================
+# KULAMAGI / QULLAMAGGIE STYLE APPEND-ONLY PATCH
+# paste this at the VERY BOTTOM of trader.py
+# =========================
+try:
+    import os as _kg_os
+    import math as _kg_math
+
+    def _kg_env_bool(name, default=False):
+        v = str(_kg_os.getenv(name, str(default))).strip().lower()
+        return v in ("1", "true", "yes", "y", "on")
+
+    def _kg_env_int(name, default):
+        try:
+            return int(str(_kg_os.getenv(name, default)).strip())
+        except Exception:
+            return int(default)
+
+    def _kg_env_float(name, default):
+        try:
+            return float(str(_kg_os.getenv(name, default)).strip())
+        except Exception:
+            return float(default)
+
+    def _kg_is_df(x):
+        try:
+            cols = getattr(x, "columns", None)
+            return cols is not None and ("close" in cols) and ("high" in cols) and ("low" in cols)
+        except Exception:
+            return False
+
+    def _kg_find_df(self, *args, **kwargs):
+        for v in kwargs.values():
+            if _kg_is_df(v):
+                return v
+        for a in args:
+            if _kg_is_df(a):
+                return a
+        for name in ("df", "_df", "klines", "_klines", "candles", "_candles", "data"):
+            v = getattr(self, name, None)
+            if _kg_is_df(v):
+                return v
+        return None
+
+    def _kg_tail_mean(series, n, default=0.0):
+        try:
+            s = series.dropna()
+            if len(s) == 0:
+                return float(default)
+            n = max(1, min(int(n), len(s)))
+            return float(s.iloc[-n:].mean())
+        except Exception:
+            return float(default)
+
+    def _kg_safe_float(x, default=0.0):
+        try:
+            if x is None:
+                return float(default)
+            return float(x)
+        except Exception:
+            return float(default)
+
+    def _kg_ema(series, span):
+        try:
+            return series.ewm(span=int(span), adjust=False).mean()
+        except Exception:
+            return series
+
+    def _kg_atr(df, period=14):
+        h = df["high"]
+        l = df["low"]
+        c = df["close"]
+        pc = c.shift(1)
+        tr1 = (h - l).abs()
+        tr2 = (h - pc).abs()
+        tr3 = (l - pc).abs()
+        tr = tr1.combine(tr2, max).combine(tr3, max)
+        return tr.rolling(int(period)).mean()
+
+    def _kg_infer_side(*args, **kwargs):
+        for k in ("side", "direction", "dir", "signal_side"):
+            v = kwargs.get(k, None)
+            if isinstance(v, str):
+                vv = v.strip().lower()
+                if vv in ("long", "buy", "bull", "up"):
+                    return "long"
+                if vv in ("short", "sell", "bear", "down"):
+                    return "short"
+        for a in args:
+            if isinstance(a, str):
+                aa = a.strip().lower()
+                if aa in ("long", "buy", "bull", "up"):
+                    return "long"
+                if aa in ("short", "sell", "bear", "down"):
+                    return "short"
+        for k in ("is_long", "long_mode"):
+            if kwargs.get(k) is True:
+                return "long"
+        for k in ("is_short", "short_mode"):
+            if kwargs.get(k) is True:
+                return "short"
+        return None
+
+    def _kg_signal_from_df(df):
+        """
+        Qullamaggie-ish:
+        1) trend in place (10/20/50 EMA alignment)
+        2) prior impulse exists
+        3) recent range compression / box
+        4) breakout candle with larger body
+        """
+        out = {
+            "ok": False,
+            "long_ok": False,
+            "short_ok": False,
+            "long_bonus": 0.0,
+            "short_bonus": 0.0,
+            "reason": "KULA_NA",
+            "box_high": None,
+            "box_low": None,
+            "long_stop_anchor": None,
+            "short_stop_anchor": None,
+        }
+
+        if df is None or len(df) < 80:
+            out["reason"] = "KULA_DF_SHORT"
+            return out
+
+        try:
+            lookback_box = max(4, _kg_env_int("KULA_BOX_BARS", 8))
+            trend_lookback = max(20, _kg_env_int("KULA_TREND_BARS", 48))
+            atr_period = max(5, _kg_env_int("KULA_ATR_PERIOD", 14))
+            body_mult = max(1.0, _kg_env_float("KULA_BODY_MULT", 1.35))
+            min_impulse_atr = max(0.5, _kg_env_float("KULA_MIN_IMPULSE_ATR", 3.0))
+            max_box_atr = max(0.2, _kg_env_float("KULA_MAX_BOX_ATR", 2.2))
+            pullback_to_ema50_atr = max(0.2, _kg_env_float("KULA_PULLBACK_50_ATR", 2.5))
+            breakout_buffer_bps = _kg_env_float("KULA_BREAKOUT_BUFFER_BPS", 5.0)
+            breakout_buffer = breakout_buffer_bps / 10000.0
+            bonus = _kg_env_float("KULA_SCORE_BONUS", 22.0)
+
+            close = df["close"].astype(float)
+            high = df["high"].astype(float)
+            low = df["low"].astype(float)
+            open_ = df["open"].astype(float) if "open" in df.columns else close.shift(1).fillna(close)
+
+            ema10 = _kg_ema(close, 10)
+            ema20 = _kg_ema(close, 20)
+            ema50 = _kg_ema(close, 50)
+            atr = _kg_atr(df, atr_period)
+
+            if len(close.dropna()) < 60 or len(atr.dropna()) < 20:
+                out["reason"] = "KULA_IND_SHORT"
+                return out
+
+            i = -1
+            prev_slice = slice(-(lookback_box + 1), -1)
+
+            last_close = _kg_safe_float(close.iloc[i])
+            last_open = _kg_safe_float(open_.iloc[i])
+            last_high = _kg_safe_float(high.iloc[i])
+            last_low = _kg_safe_float(low.iloc[i])
+            last_ema10 = _kg_safe_float(ema10.iloc[i])
+            last_ema20 = _kg_safe_float(ema20.iloc[i])
+            last_ema50 = _kg_safe_float(ema50.iloc[i])
+            last_atr = max(_kg_safe_float(atr.iloc[i], 0.0), 1e-12)
+
+            prev_box_high = _kg_safe_float(high.iloc[prev_slice].max(), 0.0)
+            prev_box_low = _kg_safe_float(low.iloc[prev_slice].min(), 0.0)
+            out["box_high"] = prev_box_high
+            out["box_low"] = prev_box_low
+
+            recent_body_avg = _kg_tail_mean((close - open_).abs().iloc[-10:-1], 9, default=0.0)
+            last_body = abs(last_close - last_open)
+
+            box_range = max(prev_box_high - prev_box_low, 0.0)
+            compressed = (box_range / last_atr) <= max_box_atr
+
+            # prior impulse
+            impulse_hi = _kg_safe_float(high.iloc[-trend_lookback-1:-1].max(), last_high)
+            impulse_lo = _kg_safe_float(low.iloc[-trend_lookback-1:-1].min(), last_low)
+            impulse_up_atr = (impulse_hi - impulse_lo) / last_atr if last_atr > 0 else 0.0
+            impulse_dn_atr = (impulse_hi - impulse_lo) / last_atr if last_atr > 0 else 0.0
+
+            long_trend = (last_ema10 > last_ema20 > last_ema50)
+            short_trend = (last_ema10 < last_ema20 < last_ema50)
+
+            # orderly pullback around ema10/20 but not broken too deep below/above ema50
+            long_hold_50 = (last_low >= (last_ema50 - pullback_to_ema50_atr * last_atr))
+            short_hold_50 = (last_high <= (last_ema50 + pullback_to_ema50_atr * last_atr))
+
+            # higher lows / lower highs feel
+            long_tight = _kg_safe_float(low.iloc[-3]) >= _kg_safe_float(low.iloc[-6:].min(), last_low) - 0.5 * last_atr
+            short_tight = _kg_safe_float(high.iloc[-3]) <= _kg_safe_float(high.iloc[-6:].max(), last_high) + 0.5 * last_atr
+
+            # breakout candle
+            bull_break = (last_close > prev_box_high * (1.0 + breakout_buffer)) and (last_close > last_open)
+            bear_break = (last_close < prev_box_low * (1.0 - breakout_buffer)) and (last_close < last_open)
+            body_ok = last_body >= max(recent_body_avg * body_mult, 0.15 * last_atr)
+
+            long_ok = all([
+                long_trend,
+                long_hold_50,
+                compressed,
+                long_tight,
+                bull_break,
+                body_ok,
+                impulse_up_atr >= min_impulse_atr,
+            ])
+
+            short_ok = all([
+                short_trend,
+                short_hold_50,
+                compressed,
+                short_tight,
+                bear_break,
+                body_ok,
+                impulse_dn_atr >= min_impulse_atr,
+            ])
+
+            out["long_ok"] = bool(long_ok)
+            out["short_ok"] = bool(short_ok)
+            out["ok"] = bool(long_ok or short_ok)
+            out["long_bonus"] = float(bonus if long_ok else 0.0)
+            out["short_bonus"] = float(bonus if short_ok else 0.0)
+            out["long_stop_anchor"] = min(prev_box_low, last_low, last_ema50)
+            out["short_stop_anchor"] = max(prev_box_high, last_high, last_ema50)
+
+            if long_ok:
+                out["reason"] = "KULA_LONG_OK"
+            elif short_ok:
+                out["reason"] = "KULA_SHORT_OK"
+            else:
+                why = []
+                if not (long_trend or short_trend):
+                    why.append("TREND")
+                if not compressed:
+                    why.append("NO_COMPRESSION")
+                if not body_ok:
+                    why.append("WEAK_BODY")
+                if not (bull_break or bear_break):
+                    why.append("NO_BREAKOUT")
+                if not why:
+                    why.append("SETUP_FAIL")
+                out["reason"] = "KULA_" + "_".join(why[:3])
+
+            return out
+        except Exception as e:
+            out["reason"] = f"KULA_ERR:{e}"
+            return out
+
+    def _kg_store_state(self, sig):
+        try:
+            if not hasattr(self, "state") or not isinstance(self.state, dict):
+                self.state = {}
+            self.state["last_kula_reason"] = sig.get("reason", "KULA_NA")
+            self.state["last_kula_long_ok"] = bool(sig.get("long_ok", False))
+            self.state["last_kula_short_ok"] = bool(sig.get("short_ok", False))
+            self.state["last_kula_box_high"] = sig.get("box_high")
+            self.state["last_kula_box_low"] = sig.get("box_low")
+            if sig.get("long_ok"):
+                self.state["last_event"] = "KULAMAGI LONG SETUP"
+            elif sig.get("short_ok"):
+                self.state["last_event"] = "KULAMAGI SHORT SETUP"
+        except Exception:
+            pass
+
+    def _kg_kulamagic_signal(self, df=None):
+        if not _kg_env_bool("KULA_ON", True):
+            return {
+                "ok": False,
+                "long_ok": False,
+                "short_ok": False,
+                "long_bonus": 0.0,
+                "short_bonus": 0.0,
+                "reason": "KULA_OFF",
+            }
+        if df is None:
+            df = _kg_find_df(self)
+        sig = _kg_signal_from_df(df)
+        _kg_store_state(self, sig)
+        return sig
+
+    # bind helper method to Trader
+    try:
+        setattr(Trader, "kulamagic_signal", _kg_kulamagic_signal)
+    except Exception:
+        pass
+
+    def _kg_wrap_score_method(method_name):
+        orig = getattr(Trader, method_name, None)
+        if not callable(orig):
+            return False
+
+        def _wrapped(self, *args, **kwargs):
+            base = orig(self, *args, **kwargs)
+            try:
+                if not _kg_env_bool("KULA_ON", True):
+                    return base
+
+                df = _kg_find_df(self, *args, **kwargs)
+                sig = self.kulamagic_signal(df)
+                side = _kg_infer_side(*args, **kwargs)
+
+                # numeric score
+                if isinstance(base, (int, float)):
+                    if side == "long" and sig.get("long_ok"):
+                        return float(base) + float(sig.get("long_bonus", 0.0))
+                    if side == "short" and sig.get("short_ok"):
+                        return float(base) + float(sig.get("short_bonus", 0.0))
+                    return base
+
+                # tuple/list with first element numeric
+                if isinstance(base, (tuple, list)) and len(base) >= 1 and isinstance(base[0], (int, float)):
+                    b0 = float(base[0])
+                    if side == "long" and sig.get("long_ok"):
+                        b0 += float(sig.get("long_bonus", 0.0))
+                    elif side == "short" and sig.get("short_ok"):
+                        b0 += float(sig.get("short_bonus", 0.0))
+                    if isinstance(base, tuple):
+                        return (b0,) + tuple(base[1:])
+                    out = list(base)
+                    out[0] = b0
+                    return out
+
+                # dict-like score payload
+                if isinstance(base, dict):
+                    out = dict(base)
+                    if "long_score" in out and sig.get("long_ok"):
+                        out["long_score"] = _kg_safe_float(out.get("long_score", 0.0)) + _kg_safe_float(sig.get("long_bonus", 0.0))
+                    if "short_score" in out and sig.get("short_ok"):
+                        out["short_score"] = _kg_safe_float(out.get("short_score", 0.0)) + _kg_safe_float(sig.get("short_bonus", 0.0))
+                    if side == "long" and "score" in out and sig.get("long_ok"):
+                        out["score"] = _kg_safe_float(out.get("score", 0.0)) + _kg_safe_float(sig.get("long_bonus", 0.0))
+                    if side == "short" and "score" in out and sig.get("short_ok"):
+                        out["score"] = _kg_safe_float(out.get("score", 0.0)) + _kg_safe_float(sig.get("short_bonus", 0.0))
+                    out["kulamagic"] = sig
+                    return out
+
+                return base
+            except Exception:
+                return base
+
+        setattr(Trader, method_name, _wrapped)
+        return True
+
+    def _kg_wrap_gate_method(method_name, side):
+        orig = getattr(Trader, method_name, None)
+        if not callable(orig):
+            return False
+
+        def _wrapped(self, *args, **kwargs):
+            base = orig(self, *args, **kwargs)
+            try:
+                if not _kg_env_bool("KULA_ON", True):
+                    return base
+                if not _kg_env_bool("KULA_HARD_FILTER", True):
+                    return base
+
+                ok_base = bool(base)
+                if not ok_base:
+                    return base
+
+                df = _kg_find_df(self, *args, **kwargs)
+                sig = self.kulamagic_signal(df)
+
+                if side == "long":
+                    if not sig.get("long_ok", False):
+                        try:
+                            if not hasattr(self, "state") or not isinstance(self.state, dict):
+                                self.state = {}
+                            self.state["last_skip_reason"] = sig.get("reason", "KULA_LONG_BLOCK")
+                        except Exception:
+                            pass
+                        return False
+                    try:
+                        self.state["last_kula_long_stop_anchor"] = sig.get("long_stop_anchor")
+                    except Exception:
+                        pass
+                    return True
+
+                if side == "short":
+                    if not sig.get("short_ok", False):
+                        try:
+                            if not hasattr(self, "state") or not isinstance(self.state, dict):
+                                self.state = {}
+                            self.state["last_skip_reason"] = sig.get("reason", "KULA_SHORT_BLOCK")
+                        except Exception:
+                            pass
+                        return False
+                    try:
+                        self.state["last_kula_short_stop_anchor"] = sig.get("short_stop_anchor")
+                    except Exception:
+                        pass
+                    return True
+
+                return base
+            except Exception:
+                return base
+
+        setattr(Trader, method_name, _wrapped)
+        return True
+
+    _kg_wrapped_any = False
+
+    for _name in (
+        "_entry_score",
+        "entry_score",
+        "calc_entry_score",
+        "score_entry",
+        "_score_signal",
+        "_signal_score",
+        "_calc_entry_score",
+    ):
+        try:
+            if _kg_wrap_score_method(_name):
+                _kg_wrapped_any = True
+        except Exception:
+            pass
+
+    for _name in (
+        "should_enter_long",
+        "_should_enter_long",
+        "can_enter_long",
+        "_can_enter_long",
+    ):
+        try:
+            if _kg_wrap_gate_method(_name, "long"):
+                _kg_wrapped_any = True
+        except Exception:
+            pass
+
+    for _name in (
+        "should_enter_short",
+        "_should_enter_short",
+        "can_enter_short",
+        "_can_enter_short",
+    ):
+        try:
+            if _kg_wrap_gate_method(_name, "short"):
+                _kg_wrapped_any = True
+        except Exception:
+            pass
+
+    # status text patch
+    try:
+        _kg_orig_status_text = getattr(Trader, "status_text", None)
+        if callable(_kg_orig_status_text):
+            def _kg_status_text(self, *args, **kwargs):
+                txt = _kg_orig_status_text(self, *args, **kwargs)
+                try:
+                    sig = self.kulamagic_signal()
+                    extra = []
+                    extra.append(f"🎯 KULA={'ON' if _kg_env_bool('KULA_ON', True) else 'OFF'} HARD={'ON' if _kg_env_bool('KULA_HARD_FILTER', True) else 'OFF'}")
+                    extra.append(f"📦 boxH={sig.get('box_high')} boxL={sig.get('box_low')}")
+                    extra.append(f"🧠 kula_reason={sig.get('reason', 'KULA_NA')}")
+                    return str(txt) + "\n" + "\n".join(extra)
+                except Exception:
+                    return txt
+            setattr(Trader, "status_text", _kg_status_text)
+    except Exception:
+        pass
+
+    try:
+        print(f"[KULA PATCH] loaded wrapped_any={_kg_wrapped_any}")
+    except Exception:
+        pass
+
+except Exception as _kula_patch_e:
+    try:
+        print("[KULA PATCH] load fail:", _kula_patch_e)
+    except Exception:
+        pass
+# =========================
+# END KULAMAGI PATCH
+# =========================
