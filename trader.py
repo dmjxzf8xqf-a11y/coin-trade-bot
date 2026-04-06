@@ -5407,3 +5407,70 @@ except Exception as _kula_patch_e:
 # =========================
 # END KULAMAGI PATCH
 # =========================
+# =========================
+# NO_TRADE DISABLE EXTEND BLOCK PATCH
+# same cooldown window 동안 disabled_until 재연장 방지
+# paste at VERY BOTTOM of trader.py
+# =========================
+try:
+    import time as _nt_time
+
+    _orig_adv_allow_trade = globals().get("_adv_allow_trade", None)
+
+    if callable(_orig_adv_allow_trade):
+        def _adv_allow_trade(*args, **kwargs):
+            try:
+                if len(args) >= 2:
+                    self_obj = args[0]
+                    strat_name = args[1]
+                else:
+                    return _orig_adv_allow_trade(*args, **kwargs)
+
+                # 기존 로직 호출 전에 현재 disabled_until 저장
+                _before_until = 0
+                try:
+                    buckets = getattr(self_obj, "_adv_buckets", {}) or {}
+                    b = buckets.get(strat_name, {}) or {}
+                    _before_until = int(b.get("disabled_until", 0) or 0)
+                except Exception:
+                    _before_until = 0
+
+                out = _orig_adv_allow_trade(*args, **kwargs)
+
+                # 기존 disabled_until 이 아직 살아있으면, 새로 더 뒤로 미는 연장 금지
+                try:
+                    buckets = getattr(self_obj, "_adv_buckets", {}) or {}
+                    b = buckets.get(strat_name, {}) or {}
+                    _after_until = int(b.get("disabled_until", 0) or 0)
+                    _now = int(_nt_time.time())
+
+                    if _before_until > _now and _after_until > _before_until:
+                        b["disabled_until"] = _before_until
+                        buckets[strat_name] = b
+                        setattr(self_obj, "_adv_buckets", buckets)
+                        try:
+                            if not hasattr(self_obj, "state") or not isinstance(self_obj.state, dict):
+                                self_obj.state = {}
+                            self_obj.state["last_event"] = f"ADV HOLD {strat_name}: cooldown kept"
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                return out
+            except Exception:
+                return _orig_adv_allow_trade(*args, **kwargs)
+
+        globals()["_adv_allow_trade"] = _adv_allow_trade
+        try:
+            print("[ADV PATCH] no_trade re-extend block loaded")
+        except Exception:
+            pass
+except Exception as _e_adv_patch:
+    try:
+        print("[ADV PATCH] load fail:", _e_adv_patch)
+    except Exception:
+        pass
+# =========================
+# END NO_TRADE DISABLE EXTEND BLOCK PATCH
+# =========================
