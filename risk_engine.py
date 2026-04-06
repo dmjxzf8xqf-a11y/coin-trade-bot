@@ -43,3 +43,38 @@ def calc_position_size(*args):
         return max(0.0, qty)
 
     raise TypeError(f"unsupported calc_position_size args: {len(args)}")
+# ===== ADVANCED RISK CONTROL PATCH =====
+try:
+    import time
+
+    class AdvancedRiskManager:
+        def __init__(self):
+            self.loss_count = 0
+            self.last_loss = 0
+
+        def update(self, pnl):
+            if pnl < 0:
+                self.loss_count += 1
+                self.last_loss = time.time()
+            else:
+                self.loss_count = 0
+
+        def risk_mult(self):
+            if self.loss_count >= 5:
+                return 0.3
+            elif self.loss_count >= 3:
+                return 0.6
+            else:
+                return 1.0
+
+    _adv_risk = AdvancedRiskManager()
+
+    def risk_adjust(pnl):
+        try:
+            _adv_risk.update(pnl)
+            return _adv_risk.risk_mult()
+        except:
+            return 1.0
+
+except Exception:
+    pass
