@@ -269,3 +269,43 @@ def get_ai_stats() -> Dict[str, Any]:
         "detail_winrate": round(detail_winrate, 2),
         "global_score": round(get_global_score(), 4),
     }
+# ===== ADVANCED AI WEIGHT PATCH =====
+try:
+    import math
+    
+    def _ai_symbol_weight(symbol, winrate, trades):
+        try:
+            if trades < 5:
+                return 1.0
+            
+            if winrate > 0.65:
+                return 1.3
+            elif winrate > 0.55:
+                return 1.15
+            elif winrate < 0.40:
+                return 0.8
+            else:
+                return 1.0
+        except:
+            return 1.0
+
+    _orig_score_ai = globals().get("ai_score_adjust")
+
+    if callable(_orig_score_ai):
+        def ai_score_adjust(score, symbol=None, stats=None):
+            base = _orig_score_ai(score, symbol, stats)
+            
+            try:
+                if stats:
+                    wr = stats.get("winrate", 0.5)
+                    trades = stats.get("trades", 0)
+                    
+                    w = _ai_symbol_weight(symbol, wr, trades)
+                    return base * w
+            except:
+                pass
+
+            return base
+
+except Exception:
+    pass
