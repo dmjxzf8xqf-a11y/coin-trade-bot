@@ -5474,3 +5474,83 @@ except Exception as _e_adv_patch:
 # =========================
 # END NO_TRADE DISABLE EXTEND BLOCK PATCH
 # =========================
+# ===== ADVANCED REGIME + VOLATILITY + POSITION AI PATCH =====
+try:
+    import math
+    import statistics
+    import time
+    
+    def _adv_regime_detect(self, prices):
+        try:
+            if len(prices) < 50:
+                return "unknown"
+            sma20 = sum(prices[-20:]) / 20
+            sma50 = sum(prices[-50:]) / 50
+            
+            if sma20 > sma50:
+                return "bull"
+            elif sma20 < sma50:
+                return "bear"
+            else:
+                return "sideways"
+        except:
+            return "unknown"
+
+    def _adv_volatility(self, prices):
+        try:
+            returns = [
+                (prices[i] - prices[i-1]) / prices[i-1]
+                for i in range(1, len(prices))
+            ]
+            return statistics.stdev(returns[-20:])
+        except:
+            return 0
+
+    def _adv_position_size(self, score):
+        try:
+            if score >= 80:
+                return 1.0
+            elif score >= 70:
+                return 0.7
+            elif score >= 60:
+                return 0.5
+            else:
+                return 0.3
+        except:
+            return 1.0
+
+    _orig_mp_adv = getattr(Trader, "_mp", None)
+
+    if callable(_orig_mp_adv):
+        def _mp_adv(self, *args, **kwargs):
+            mp = _orig_mp_adv(self, *args, **kwargs)
+
+            try:
+                prices = getattr(self, "_last_prices", [])
+                regime = _adv_regime_detect(self, prices)
+                vol = _adv_volatility(self, prices)
+
+                lev = mp.get("lev", 8)
+
+                # volatility leverage adjust
+                if vol > 0.01:
+                    lev = max(3, lev - 2)
+                elif vol < 0.003:
+                    lev = min(15, lev + 2)
+
+                score = mp.get("score", 70)
+                size_mult = _adv_position_size(self, score)
+
+                mp["lev"] = lev
+                mp["size_mult"] = size_mult
+                mp["regime"] = regime
+
+            except Exception as e:
+                pass
+
+            return mp
+
+        Trader._mp = _mp_adv
+
+except Exception as e:
+    pass
