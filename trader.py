@@ -5554,3 +5554,12 @@ try:
 
 except Exception as e:
     pass
+# === FORCE UNLOCK ADV BLOCK ===
+try:
+    _orig_should_block = getattr(Trader, "_should_adv_block", None)
+    if callable(_orig_should_block):
+        def _no_adv_block(self, *a, **kw):
+            return False
+        Trader._should_adv_block = _no_adv_block
+except Exception:
+    pass
