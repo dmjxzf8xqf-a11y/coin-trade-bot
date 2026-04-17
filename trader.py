@@ -5563,3 +5563,99 @@ try:
         Trader._should_adv_block = _no_adv_block
 except Exception:
     pass
+# ================================
+# 🔥 NFI PATCH (하단 추가용 - 안전)
+# ================================
+
+def _nfi_patch_apply(self):
+
+    # ---------------------------
+    # Dip Buy 체크
+    # ---------------------------
+    def dip_buy(df):
+        try:
+            close = df['close'].iloc[-1]
+            ema50 = df['close'].ewm(span=50).mean().iloc[-1]
+
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rs = gain / (loss + 1e-9)
+            rsi = 100 - (100 / (1 + rs))
+            rsi_val = rsi.iloc[-1]
+
+            ma = df['close'].rolling(20).mean()
+            std = df['close'].rolling(20).std()
+            lower = ma - 2 * std
+            bb_lower = lower.iloc[-1]
+
+            if rsi_val < 30 and close < ema50 and close <= bb_lower:
+                return True
+        except:
+            pass
+        return False
+
+    # ---------------------------
+    # 기존 함수 후킹 (override)
+    # ---------------------------
+    if hasattr(self, "compute_signal_and_exits"):
+        orig_func = self.compute_signal_and_exits
+
+        def wrapped(*args, **kwargs):
+            result = orig_func(*args, **kwargs)
+
+            try:
+                df = args[1] if len(args) > 1 else kwargs.get("df")
+
+                if df is not None and dip_buy(df):
+                    # 강제 롱 진입
+                    if isinstance(result, dict):
+                        result["signal"] = "long"
+            except:
+                pass
+
+            return result
+
+        self.compute_signal_and_exits = wrapped
+
+    # ---------------------------
+    # TP 확장 (다단계)
+    # ---------------------------
+    if hasattr(self, "get_take_profit"):
+        orig_tp = self.get_take_profit
+
+        def tp_wrapper(entry_price, side):
+            levels = [0.01, 0.02, 0.03, 0.05]
+            sizes = [0.3, 0.3, 0.2, 0.2]
+
+            tps = []
+            for lvl, size in zip(levels, sizes):
+                if side == "long":
+                    price = entry_price * (1 + lvl)
+                else:
+                    price = entry_price * (1 - lvl)
+
+                tps.append((price, size))
+
+            return tps
+
+        self.get_take_profit = tp_wrapper
+
+
+# ================================
+# 🔥 자동 적용 (초기화 후 실행)
+# ================================
+try:
+    if hasattr(Trader, "__init__"):
+        orig_init = Trader.__init__
+
+        def new_init(self, *args, **kwargs):
+            orig_init(self, *args, **kwargs)
+            try:
+                _nfi_patch_apply(self)
+            except:
+                pass
+
+        Trader.__init__ = new_init
+except:
+    pass
