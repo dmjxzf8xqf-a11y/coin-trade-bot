@@ -96,9 +96,25 @@ if AI_SCORE_PATCH_ON:
     if callable(_orig_enter):
         def _enter_ai_patch(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float, *args, **kwargs):
             before_n = len(getattr(self, "positions", []) or [])
-            atr = kwargs.get("atr", 0.0) or 0.0
-            score = float(kwargs.get("score", 0.0) or 0.0)
-            strategy = str(kwargs.get("strategy", "") or "unknown")
+
+            # _enter() is commonly called with positional args:
+            # _enter(symbol, side, price, reason, sl, tp, strategy, score, atr)
+            # Older patch only read kwargs, so strategy/score/atr were often saved as unknown/0.
+            strategy = kwargs.get("strategy", None)
+            score = kwargs.get("score", None)
+            atr = kwargs.get("atr", None)
+            ai_adjustment = kwargs.get("ai_adjustment", 0.0)
+
+            if strategy is None and len(args) >= 1:
+                strategy = args[0]
+            if score is None and len(args) >= 2:
+                score = args[1]
+            if atr is None and len(args) >= 3:
+                atr = args[2]
+
+            strategy = str(strategy or "unknown")
+            score = float(score or 0.0)
+            atr = float(atr or 0.0)
             regime = _safe_regime(symbol)
             # size scaling by learned score quality.
             mp = None
@@ -123,9 +139,9 @@ if AI_SCORE_PATCH_ON:
                     pos = self.positions[-1]
                     pos["regime"] = regime
                     pos["entry_reason_text"] = reason
-                    pos["entry_score_raw"] = float(kwargs.get("score", 0.0) or 0.0)
+                    pos["entry_score_raw"] = float(score or 0.0)
                     pos["entry_score_final"] = float(score or 0.0)
-                    pos["ai_adjustment"] = float(kwargs.get("ai_adjustment", 0.0) or 0.0)
+                    pos["ai_adjustment"] = float(ai_adjustment or 0.0)
                     pos["atr_at_entry"] = float(atr or 0.0)
             except Exception:
                 pass
