@@ -819,8 +819,8 @@ def apply_strategy_to_mp(symbol: str, mp: dict):
     regime = detect_market_regime(symbol)
     strategy = select_strategy(regime)
 
-    if strategy == "low_risk":
-        return False, f"STRATEGY_BLOCK: {regime} -> low_risk", strategy
+    if strategy in ("low_risk", "no_trade"):
+        return False, f"STRATEGY_BLOCK: {regime} -> {strategy}", strategy
 
     if strategy == "mean_reversion":
         mp["enter_score"] = int(mp.get("enter_score", 65)) + 5
@@ -931,7 +931,7 @@ def _tg_keyboard():
         "keyboard": [
             ["▶️ 시작 /start", "⏹️ 중지 /stop"],
             ["🛡️ 안전 /safe", "⚔️ 공격 /aggro"],
-            ["📊 상태 /status", "❓ 도움말 /help"],
+            ["📊 상태 /status", "🔍 이유 /why", "❓ 도움말 /help"],
             ["🟢 매수 /buy", "🔴 숏 /short", "💥 긴급청산 /panic"],
             ["🎛️ 버튼켜기 /ui on", "🎛️ 버튼끄기 /ui off"],
         ],
@@ -1340,8 +1340,9 @@ class Trader:
                 mtf = None
 
         # MTF gate (HTF trend filter)
-        mtf_block_long = (mtf == "DOWN")
-        mtf_block_short = (mtf == "UP")
+        mtf_norm = str(mtf or "").lower()
+        mtf_block_long = (mtf_norm == "down")
+        mtf_block_short = (mtf_norm == "up")
 
         if self.allow_long and (not mtf_block_long):
             okL, reasonL, scoreL, slL, tpL, aL = compute_signal_and_exits(
@@ -1805,6 +1806,14 @@ class Trader:
             self.notify(f"🧠 avoid_low_rsi={self.state['avoid_low_rsi']}")
             return
 
+        if c0 == "/help":
+            self.notify(self.help_text())
+            return
+
+        if c0 == "/why":
+            self.notify(self.why_text())
+            return
+
         if c0 == "/status":
             if self.state.get("tg_buttons_on", False):
                 tg_send(self.status_text(), reply_markup=_tg_keyboard())
@@ -1848,7 +1857,7 @@ class Trader:
             "📌 명령어\n"
             "/start /stop\n"
             "/safe /aggro\n"
-            "/status\n"
+            "/status /why /doctor\n"
             "/buy /short /sell /panic\n"
             "\n"
             "🧭 멀티코인\n"
@@ -1873,6 +1882,51 @@ class Trader:
             "🧠 옵션\n"
             "/avoidrsi on|off   (RSI<40 회피)\n"
         )
+
+    def why_text(self):
+        """Show the most likely reason the bot is not entering a trade."""
+        try:
+            mp = self._mp()
+        except Exception:
+            mp = {}
+
+        last_scan = self.state.get("last_scan") or {}
+        reasons = last_scan.get("reasons") or []
+        picked = last_scan.get("picked")
+        mtf = self.state.get("mtf") or {}
+        last_skip = str(getattr(self, "_last_skip_reason", "") or self.state.get("last_skip_reason", "") or "")
+        last_event = str(self.state.get("last_event", "") or "")
+        cooldown_left = max(0, int(float(getattr(self, "_cooldown_until", 0) or 0) - time.time()))
+
+        lines = []
+        lines.append("🔍 WHY NO TRADE")
+        lines.append(f"ON={bool(self.trading_enabled)} | MODE={self.mode} | DRY_RUN={DRY_RUN}")
+        lines.append(f"enter_score>={mp.get('enter_score', '-')} | lev={mp.get('lev', '-')} | order_usdt={mp.get('order_usdt', '-')}")
+        lines.append(f"AUTO_SYMBOL={self.auto_symbol} | DISCOVERY={self.auto_discovery} | DIVERSIFY={self.diversify} | MAX_POS={self.max_positions}")
+        lines.append(f"positions={len(self.positions or [])}/{self.max_positions} | cooldown_left={cooldown_left}s | allowed_now={entry_allowed_now_utc()}")
+        lines.append(f"filters: MTF={USE_MTF_FILTER} trend={mtf.get('trend', '-')} | LIQ={USE_LIQUIDITY_FILTER} | avoid_low_rsi={bool(self.state.get('avoid_low_rsi', False))}")
+
+        if last_skip:
+            lines.append(f"last_skip={last_skip}")
+        if last_event:
+            lines.append(f"last_event={last_event}")
+
+        if picked:
+            try:
+                lines.append(f"picked={picked.get('symbol')} {picked.get('side')} score={picked.get('score')} strategy={picked.get('strategy', '-')}")
+            except Exception:
+                lines.append(f"picked={picked}")
+        else:
+            lines.append("picked=None")
+
+        if reasons:
+            lines.append("최근 스캔 차단/탈락:")
+            for r in reasons[:12]:
+                lines.append(f"- {r}")
+        else:
+            lines.append("최근 스캔 기록 없음. /status 확인 후 1~2틱 뒤 다시 /why")
+
+        return "\n".join(lines)
 
     def status_text(self):
         total = self.win + self.loss
@@ -3182,6 +3236,18 @@ if FINAL10_ON:
                 perf_lines.append(f"- error: {e}")
             self.notify("\n".join(perf_lines))
             return
+        if low == "/help":
+            try:
+                self.notify(self.help_text())
+            except Exception as e:
+                self.notify(f"❌ help 오류: {e}")
+            return
+        if low == "/why":
+            try:
+                self.notify(self.why_text())
+            except Exception as e:
+                self.notify(f"❌ why 오류: {e}")
+            return
         if low == "/weights":
             lines = ["⚖️ Strategy Weights"]
             try:
@@ -4443,7 +4509,7 @@ try:
                 pass
             _uf_sync_runtime(self, force=False)
             return rv
-        Trader.tick = _uf
+        Trader.tick = _uf_tick
 except Exception as e:
     print("ULTIMATE FUSION PATCH FAIL:", e)
 # =========================
@@ -5407,255 +5473,3 @@ except Exception as _kula_patch_e:
 # =========================
 # END KULAMAGI PATCH
 # =========================
-# =========================
-# NO_TRADE DISABLE EXTEND BLOCK PATCH
-# same cooldown window 동안 disabled_until 재연장 방지
-# paste at VERY BOTTOM of trader.py
-# =========================
-try:
-    import time as _nt_time
-
-    _orig_adv_allow_trade = globals().get("_adv_allow_trade", None)
-
-    if callable(_orig_adv_allow_trade):
-        def _adv_allow_trade(*args, **kwargs):
-            try:
-                if len(args) >= 2:
-                    self_obj = args[0]
-                    strat_name = args[1]
-                else:
-                    return _orig_adv_allow_trade(*args, **kwargs)
-
-                # 기존 로직 호출 전에 현재 disabled_until 저장
-                _before_until = 0
-                try:
-                    buckets = getattr(self_obj, "_adv_buckets", {}) or {}
-                    b = buckets.get(strat_name, {}) or {}
-                    _before_until = int(b.get("disabled_until", 0) or 0)
-                except Exception:
-                    _before_until = 0
-
-                out = _orig_adv_allow_trade(*args, **kwargs)
-
-                # 기존 disabled_until 이 아직 살아있으면, 새로 더 뒤로 미는 연장 금지
-                try:
-                    buckets = getattr(self_obj, "_adv_buckets", {}) or {}
-                    b = buckets.get(strat_name, {}) or {}
-                    _after_until = int(b.get("disabled_until", 0) or 0)
-                    _now = int(_nt_time.time())
-
-                    if _before_until > _now and _after_until > _before_until:
-                        b["disabled_until"] = _before_until
-                        buckets[strat_name] = b
-                        setattr(self_obj, "_adv_buckets", buckets)
-                        try:
-                            if not hasattr(self_obj, "state") or not isinstance(self_obj.state, dict):
-                                self_obj.state = {}
-                            self_obj.state["last_event"] = f"ADV HOLD {strat_name}: cooldown kept"
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-                return out
-            except Exception:
-                return _orig_adv_allow_trade(*args, **kwargs)
-
-        globals()["_adv_allow_trade"] = _adv_allow_trade
-        try:
-            print("[ADV PATCH] no_trade re-extend block loaded")
-        except Exception:
-            pass
-except Exception as _e_adv_patch:
-    try:
-        print("[ADV PATCH] load fail:", _e_adv_patch)
-    except Exception:
-        pass
-# =========================
-# END NO_TRADE DISABLE EXTEND BLOCK PATCH
-# =========================
-# ===== ADVANCED REGIME + VOLATILITY + POSITION AI PATCH =====
-try:
-    import math
-    import statistics
-    import time
-    
-    def _adv_regime_detect(self, prices):
-        try:
-            if len(prices) < 50:
-                return "unknown"
-            sma20 = sum(prices[-20:]) / 20
-            sma50 = sum(prices[-50:]) / 50
-            
-            if sma20 > sma50:
-                return "bull"
-            elif sma20 < sma50:
-                return "bear"
-            else:
-                return "sideways"
-        except:
-            return "unknown"
-
-    def _adv_volatility(self, prices):
-        try:
-            returns = [
-                (prices[i] - prices[i-1]) / prices[i-1]
-                for i in range(1, len(prices))
-            ]
-            return statistics.stdev(returns[-20:])
-        except:
-            return 0
-
-    def _adv_position_size(self, score):
-        try:
-            if score >= 80:
-                return 1.0
-            elif score >= 70:
-                return 0.7
-            elif score >= 60:
-                return 0.5
-            else:
-                return 0.3
-        except:
-            return 1.0
-
-    _orig_mp_adv = getattr(Trader, "_mp", None)
-
-    if callable(_orig_mp_adv):
-        def _mp_adv(self, *args, **kwargs):
-            mp = _orig_mp_adv(self, *args, **kwargs)
-
-            try:
-                prices = getattr(self, "_last_prices", [])
-                regime = _adv_regime_detect(self, prices)
-                vol = _adv_volatility(self, prices)
-
-                lev = mp.get("lev", 8)
-
-                # volatility leverage adjust
-                if vol > 0.01:
-                    lev = max(3, lev - 2)
-                elif vol < 0.003:
-                    lev = min(15, lev + 2)
-
-                score = mp.get("score", 70)
-                size_mult = _adv_position_size(self, score)
-
-                mp["lev"] = lev
-                mp["size_mult"] = size_mult
-                mp["regime"] = regime
-
-            except Exception as e:
-                pass
-
-            return mp
-
-        Trader._mp = _mp_adv
-
-except Exception as e:
-    pass
-# === FORCE UNLOCK ADV BLOCK ===
-try:
-    _orig_should_block = getattr(Trader, "_should_adv_block", None)
-    if callable(_orig_should_block):
-        def _no_adv_block(self, *a, **kw):
-            return False
-        Trader._should_adv_block = _no_adv_block
-except Exception:
-    pass
-# ================================
-# 🔥 NFI PATCH (하단 추가용 - 안전)
-# ================================
-
-def _nfi_patch_apply(self):
-
-    # ---------------------------
-    # Dip Buy 체크
-    # ---------------------------
-    def dip_buy(df):
-        try:
-            close = df['close'].iloc[-1]
-            ema50 = df['close'].ewm(span=50).mean().iloc[-1]
-
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rs = gain / (loss + 1e-9)
-            rsi = 100 - (100 / (1 + rs))
-            rsi_val = rsi.iloc[-1]
-
-            ma = df['close'].rolling(20).mean()
-            std = df['close'].rolling(20).std()
-            lower = ma - 2 * std
-            bb_lower = lower.iloc[-1]
-
-            if rsi_val < 30 and close < ema50 and close <= bb_lower:
-                return True
-        except:
-            pass
-        return False
-
-    # ---------------------------
-    # 기존 함수 후킹 (override)
-    # ---------------------------
-    if hasattr(self, "compute_signal_and_exits"):
-        orig_func = self.compute_signal_and_exits
-
-        def wrapped(*args, **kwargs):
-            result = orig_func(*args, **kwargs)
-
-            try:
-                df = args[1] if len(args) > 1 else kwargs.get("df")
-
-                if df is not None and dip_buy(df):
-                    # 강제 롱 진입
-                    if isinstance(result, dict):
-                        result["signal"] = "long"
-            except:
-                pass
-
-            return result
-
-        self.compute_signal_and_exits = wrapped
-
-    # ---------------------------
-    # TP 확장 (다단계)
-    # ---------------------------
-    if hasattr(self, "get_take_profit"):
-        orig_tp = self.get_take_profit
-
-        def tp_wrapper(entry_price, side):
-            levels = [0.01, 0.02, 0.03, 0.05]
-            sizes = [0.3, 0.3, 0.2, 0.2]
-
-            tps = []
-            for lvl, size in zip(levels, sizes):
-                if side == "long":
-                    price = entry_price * (1 + lvl)
-                else:
-                    price = entry_price * (1 - lvl)
-
-                tps.append((price, size))
-
-            return tps
-
-        self.get_take_profit = tp_wrapper
-
-
-# ================================
-# 🔥 자동 적용 (초기화 후 실행)
-# ================================
-try:
-    if hasattr(Trader, "__init__"):
-        orig_init = Trader.__init__
-
-        def new_init(self, *args, **kwargs):
-            orig_init(self, *args, **kwargs)
-            try:
-                _nfi_patch_apply(self)
-            except:
-                pass
-
-        Trader.__init__ = new_init
-except:
-    pass
