@@ -2,16 +2,27 @@
 from ai_learn import get_bucket_score, get_symbol_side_score, get_global_score
 
 
+def _norm_regime(regime: str) -> str:
+    return (regime or "").strip().lower()
+
+
 def select_strategy(regime: str) -> str:
-    r = (regime or "").lower()
-    if r == "high_volatility":
+    """Map every regime name used in trader.py/market_regime.py to one strategy key.
+
+    trader.py currently emits: bull / bear / range / volatile.
+    Older helpers sometimes emit: bull_strong / bear_strong / sideways / high_volatility.
+    """
+    r = _norm_regime(regime)
+
+    if r in ("volatile", "high_volatility", "panic", "crash"):
         return "defense"
-    if r == "sideways":
+    if r in ("range", "sideways", "sideway", "chop", "unknown", ""):
         return "no_trade"
-    if r == "bull_strong":
+    if r in ("bull", "bull_strong", "up", "uptrend"):
         return "trend_long"
-    if r == "bear_strong":
+    if r in ("bear", "bear_strong", "down", "downtrend"):
         return "trend_short"
+
     return "no_trade"
 
 
@@ -24,16 +35,17 @@ def compute_ai_enter_score(symbol: str, side: str, strategy: str, regime: str, b
     # hardening: trend strategies need higher baseline quality
     if strategy in ("trend_long", "trend_short"):
         score += 4.0
-    if regime == "high_volatility":
+    if _norm_regime(regime) in ("high_volatility", "volatile"):
         score += 6.0
     return round(score, 4)
 
 
 def should_block_trade(symbol: str, side: str, strategy: str, regime: str, enter_score: float):
+    r = _norm_regime(regime)
     if strategy == "no_trade":
-        return True, "í¡ë³´ì¥/ë¶ëªí êµ¬ê° ì§ì ê¸ì§"
-    if regime == "high_volatility" and strategy != "defense":
-        return True, "ê³ ë³ëì± êµ¬ê°ììë defenseë§ íì©"
+        return True, "횡보/불명확 구간 진입 금지"
+    if r in ("high_volatility", "volatile") and strategy != "defense":
+        return True, "고변동성 구간에서는 defense만 허용"
 
     min_map = {
         "defense": 72,
@@ -42,5 +54,5 @@ def should_block_trade(symbol: str, side: str, strategy: str, regime: str, enter
     }
     need = min_map.get(strategy, 72)
     if enter_score < need:
-        return True, f"AI ì ì ë¶ì¡± ({enter_score:.1f} < {need})"
-    return False, "íµê³¼"
+        return True, f"AI 점수 부족 ({enter_score:.1f} < {need})"
+    return False, "통과"
