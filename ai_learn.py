@@ -18,32 +18,153 @@ def _deepcopy_default() -> Dict[str, Any]:
     return json.loads(json.dumps(DEFAULT_STATE))
 
 
-def _load() -> Dict[str, Any]:
-    data = safe_read_json(LEARN_FILE, _deepcopy_default())
-    if not isinstance(data, dict):
-        return _deepcopy_default()
-    data.setdefault("global", json.loads(json.dumps(DEFAULT_STATE["global"])))
-    data.setdefault("global_detail", json.loads(json.dumps(DEFAULT_STATE["global_detail"])))
-    data.setdefault("buckets", {})
-    data.setdefault("milestones", {"last_winrate_notice": 0})
-    return data
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(value))
+    except Exception:
+        return default
 
 
-def _save(data: Dict[str, Any]) -> None:
-    atomic_write_json(LEARN_FILE, data)
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _coerce_recent(value: Any, maxlen: int = 120) -> List[Dict[str, Any]]:
+    """Keep only dict rows so old/broken JSON cannot crash AI scoring."""
+    if not isinstance(value, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            out.append(item)
+    return out[-maxlen:]
+
+
+def _normalize_counter_bucket(value: Any, default: Dict[str, Any], recent_max: int = 120) -> Dict[str, Any]:
+    """Normalize a stats object that should contain trades/wins/losses/pnl_sum/recent."""
+    base = json.loads(json.dumps(default))
+    if not isinstance(value, dict):
+        return base
+
+    base["trades"] = _to_int(value.get("trades", base.get("trades", 0)), 0)
+    base["wins"] = _to_int(value.get("wins", base.get("wins", 0)), 0)
+    base["losses"] = _to_int(value.get("losses", base.get("losses", 0)), 0)
+    base["pnl_sum"] = _to_float(value.get("pnl_sum", base.get("pnl_sum", 0.0)), 0.0)
+    base["recent"] = _coerce_recent(value.get("recent", []), recent_max)
+
+    # Preserve harmless extra fields.
+    for k, v in value.items():
+        if k not in base and k != "recent":
+            base[k] = v
+    return base
 
 
 def _bucket_key(symbol: str, side: str, strategy: str, regime: str) -> str:
     return f"{(symbol or '').upper()}|{(side or '').upper()}|{strategy or 'unknown'}|{regime or 'unknown'}"
 
 
+def _normalize_state(data: Any) -> Dict[str, Any]:
+    """Repair learn_state.json in memory and write it back safely.
+
+    Fixes the common crash:
+    AI_PATCH_ERR 'list' object has no attribute 'keys'
+
+    Cause:
+    - global/global_detail/buckets/recent can become a list or another invalid type.
+    - The runtime AI patch expects dict-like objects.
+    """
+    default = _deepcopy_default()
+    if not isinstance(data, dict):
+        return default
+
+    data["global"] = _normalize_counter_bucket(data.get("global"), default["global"], 120)
+    data["global_detail"] = _normalize_counter_bucket(data.get("global_detail"), default["global_detail"], 120)
+
+    raw_buckets = data.get("buckets", {})
+    fixed_buckets: Dict[str, Any] = {}
+
+    if isinstance(raw_buckets, dict):
+        iterable = raw_buckets.items()
+        for key, bucket in iterable:
+            if not isinstance(bucket, dict):
+                continue
+            nb = _normalize_counter_bucket(
+                bucket,
+                {"trades": 0, "wins": 0, "losses": 0, "pnl_sum": 0.0, "recent": []},
+                80,
+            )
+            nb["symbol"] = str(bucket.get("symbol") or nb.get("symbol") or "")
+            nb["side"] = str(bucket.get("side") or nb.get("side") or "")
+            nb["strategy"] = str(bucket.get("strategy") or nb.get("strategy") or "unknown")
+            nb["regime"] = str(bucket.get("regime") or nb.get("regime") or "unknown")
+            fixed_buckets[str(key)] = nb
+
+    elif isinstance(raw_buckets, list):
+        # Convert an accidental list of bucket objects into the expected dict shape.
+        for bucket in raw_buckets:
+            if not isinstance(bucket, dict):
+                continue
+            symbol = str(bucket.get("symbol") or "").upper()
+            side = str(bucket.get("side") or "").upper()
+            strategy = str(bucket.get("strategy") or "unknown")
+            regime = str(bucket.get("regime") or "unknown")
+            if not symbol or not side:
+                continue
+            key = _bucket_key(symbol, side, strategy, regime)
+            nb = _normalize_counter_bucket(
+                bucket,
+                {"trades": 0, "wins": 0, "losses": 0, "pnl_sum": 0.0, "recent": []},
+                80,
+            )
+            nb["symbol"] = symbol
+            nb["side"] = side
+            nb["strategy"] = strategy
+            nb["regime"] = regime
+            fixed_buckets[key] = nb
+
+    data["buckets"] = fixed_buckets
+
+    if not isinstance(data.get("milestones"), dict):
+        data["milestones"] = json.loads(json.dumps(default["milestones"]))
+    else:
+        data["milestones"].setdefault("last_winrate_notice", 0)
+
+    return data
+
+
+def _load() -> Dict[str, Any]:
+    data = safe_read_json(LEARN_FILE, _deepcopy_default())
+    data = _normalize_state(data)
+    # Persist the repaired shape so the same crash does not repeat every tick.
+    try:
+        atomic_write_json(LEARN_FILE, data)
+    except Exception:
+        pass
+    return data
+
+
+def _save(data: Dict[str, Any]) -> None:
+    atomic_write_json(LEARN_FILE, _normalize_state(data))
+
+
 def _append_recent(arr: List[Dict[str, Any]], item: Dict[str, Any], maxlen: int = 80) -> None:
-    arr.append(item)
+    if not isinstance(arr, list):
+        return
+    if isinstance(item, dict):
+        arr.append(item)
     if len(arr) > maxlen:
         del arr[:-maxlen]
 
 
 def _weighted_components(recent: List[Dict[str, Any]]) -> Dict[str, float]:
+    recent = _coerce_recent(recent, 500)
     if not recent:
         return {"winrate": 0.0, "avg_pnl": 0.0, "score": 0.0}
 
@@ -52,10 +173,10 @@ def _weighted_components(recent: List[Dict[str, Any]]) -> Dict[str, float]:
     pnl_score = 0.0
     n = len(recent)
     for i, r in enumerate(recent):
-        age = (n - 1 - i)
+        age = n - 1 - i
         w = 0.92 ** age
         total_w += w
-        pnl = float(r.get("pnl", 0.0) or 0.0)
+        pnl = _to_float(r.get("pnl", 0.0), 0.0)
         if pnl > 0:
             win_score += 1.0 * w
         pnl_score += pnl * w
@@ -71,10 +192,15 @@ def _weighted_components(recent: List[Dict[str, Any]]) -> Dict[str, float]:
 
 
 def _bucket_stats(bucket: Dict[str, Any]) -> Dict[str, Any]:
-    trades = int(bucket.get("trades", 0) or 0)
-    wins = int(bucket.get("wins", 0) or 0)
-    losses = int(bucket.get("losses", 0) or 0)
-    pnl_sum = float(bucket.get("pnl_sum", 0.0) or 0.0)
+    bucket = _normalize_counter_bucket(
+        bucket,
+        {"trades": 0, "wins": 0, "losses": 0, "pnl_sum": 0.0, "recent": []},
+        80,
+    )
+    trades = _to_int(bucket.get("trades", 0), 0)
+    wins = _to_int(bucket.get("wins", 0), 0)
+    losses = _to_int(bucket.get("losses", 0), 0)
+    pnl_sum = _to_float(bucket.get("pnl_sum", 0.0), 0.0)
     comp = _weighted_components(bucket.get("recent", []))
     return {
         "trades": trades,
@@ -91,13 +217,15 @@ def _bucket_stats(bucket: Dict[str, Any]) -> Dict[str, Any]:
 def record_trade_result(pnl: float) -> None:
     data = _load()
     g = data["global"]
-    pnl = float(pnl or 0.0)
-    g["trades"] = int(g.get("trades", 0) or 0) + 1
+    pnl = _to_float(pnl, 0.0)
+    g["trades"] = _to_int(g.get("trades", 0), 0) + 1
     if pnl > 0:
-        g["wins"] = int(g.get("wins", 0) or 0) + 1
+        g["wins"] = _to_int(g.get("wins", 0), 0) + 1
     elif pnl < 0:
-        g["losses"] = int(g.get("losses", 0) or 0) + 1
-    g["pnl_sum"] = float(g.get("pnl_sum", 0.0) or 0.0) + pnl
+        g["losses"] = _to_int(g.get("losses", 0), 0) + 1
+    g["pnl_sum"] = _to_float(g.get("pnl_sum", 0.0), 0.0) + pnl
+    if not isinstance(g.get("recent"), list):
+        g["recent"] = []
     _append_recent(g["recent"], {"ts": int(time.time()), "pnl": pnl}, maxlen=120)
     _save(data)
 
@@ -114,7 +242,7 @@ def record_trade_result_ex(
 ) -> None:
     data = _load()
     ts = int(time.time())
-    pnl = float(pnl or 0.0)
+    pnl = _to_float(pnl, 0.0)
     symbol = (symbol or "").upper()
     side = (side or "").upper()
     strategy = strategy or "unknown"
@@ -122,12 +250,14 @@ def record_trade_result_ex(
     extra = extra or {}
 
     gd = data["global_detail"]
-    gd["trades"] = int(gd.get("trades", 0) or 0) + 1
+    gd["trades"] = _to_int(gd.get("trades", 0), 0) + 1
     if pnl > 0:
-        gd["wins"] = int(gd.get("wins", 0) or 0) + 1
+        gd["wins"] = _to_int(gd.get("wins", 0), 0) + 1
     elif pnl < 0:
-        gd["losses"] = int(gd.get("losses", 0) or 0) + 1
-    gd["pnl_sum"] = float(gd.get("pnl_sum", 0.0) or 0.0) + pnl
+        gd["losses"] = _to_int(gd.get("losses", 0), 0) + 1
+    gd["pnl_sum"] = _to_float(gd.get("pnl_sum", 0.0), 0.0) + pnl
+    if not isinstance(gd.get("recent"), list):
+        gd["recent"] = []
     _append_recent(gd["recent"], {
         "ts": ts,
         "pnl": pnl,
@@ -135,10 +265,13 @@ def record_trade_result_ex(
         "side": side,
         "strategy": strategy,
         "regime": regime,
-        "enter_score": float(enter_score or 0.0),
+        "enter_score": _to_float(enter_score, 0.0),
         "reason": reason,
         **extra,
     }, maxlen=120)
+
+    if not isinstance(data.get("buckets"), dict):
+        data["buckets"] = {}
 
     key = _bucket_key(symbol, side, strategy, regime)
     b = data["buckets"].setdefault(key, {
@@ -152,16 +285,32 @@ def record_trade_result_ex(
         "pnl_sum": 0.0,
         "recent": [],
     })
-    b["trades"] = int(b.get("trades", 0) or 0) + 1
+    if not isinstance(b, dict):
+        b = {
+            "symbol": symbol,
+            "side": side,
+            "strategy": strategy,
+            "regime": regime,
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "pnl_sum": 0.0,
+            "recent": [],
+        }
+        data["buckets"][key] = b
+
+    b["trades"] = _to_int(b.get("trades", 0), 0) + 1
     if pnl > 0:
-        b["wins"] = int(b.get("wins", 0) or 0) + 1
+        b["wins"] = _to_int(b.get("wins", 0), 0) + 1
     elif pnl < 0:
-        b["losses"] = int(b.get("losses", 0) or 0) + 1
-    b["pnl_sum"] = float(b.get("pnl_sum", 0.0) or 0.0) + pnl
+        b["losses"] = _to_int(b.get("losses", 0), 0) + 1
+    b["pnl_sum"] = _to_float(b.get("pnl_sum", 0.0), 0.0) + pnl
+    if not isinstance(b.get("recent"), list):
+        b["recent"] = []
     _append_recent(b["recent"], {
         "ts": ts,
         "pnl": pnl,
-        "enter_score": float(enter_score or 0.0),
+        "enter_score": _to_float(enter_score, 0.0),
         "reason": reason,
         **extra,
     }, maxlen=80)
@@ -170,37 +319,53 @@ def record_trade_result_ex(
 
 def get_bucket_stats(symbol: str, side: str, strategy: str, regime: str) -> Dict[str, Any]:
     data = _load()
-    b = data["buckets"].get(_bucket_key(symbol, side, strategy, regime))
-    if not b:
-        return {"trades": 0, "wins": 0, "losses": 0, "winrate": 0.0, "pnl_sum": 0.0, "weighted_winrate": 0.0, "weighted_avg_pnl": 0.0, "weighted_score": 0.0}
+    b = data.get("buckets", {}).get(_bucket_key(symbol, side, strategy, regime))
+    if not isinstance(b, dict):
+        return {
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "winrate": 0.0,
+            "pnl_sum": 0.0,
+            "weighted_winrate": 0.0,
+            "weighted_avg_pnl": 0.0,
+            "weighted_score": 0.0,
+        }
     return _bucket_stats(b)
 
 
 def get_bucket_score(symbol: str, side: str, strategy: str, regime: str) -> float:
-    return float(get_bucket_stats(symbol, side, strategy, regime).get("weighted_score", 0.0) or 0.0)
+    return _to_float(get_bucket_stats(symbol, side, strategy, regime).get("weighted_score", 0.0), 0.0)
 
 
 def get_symbol_side_score(symbol: str, side: str) -> float:
     data = _load()
-    vals = []
-    for b in data.get("buckets", {}).values():
+    vals: List[float] = []
+    buckets = data.get("buckets", {})
+    if not isinstance(buckets, dict):
+        return 0.0
+    for b in buckets.values():
+        if not isinstance(b, dict):
+            continue
         if (b.get("symbol") or "").upper() == (symbol or "").upper() and (b.get("side") or "").upper() == (side or "").upper():
-            vals.append(float(_bucket_stats(b).get("weighted_score", 0.0) or 0.0))
+            vals.append(_to_float(_bucket_stats(b).get("weighted_score", 0.0), 0.0))
     return (sum(vals) / len(vals)) if vals else 0.0
 
 
 def get_global_score() -> float:
     data = _load()
     gd = data.get("global_detail", {})
-    return float(_weighted_components(gd.get("recent", [])).get("score", 0.0) or 0.0)
+    if not isinstance(gd, dict):
+        gd = {}
+    return _to_float(_weighted_components(gd.get("recent", [])).get("score", 0.0), 0.0)
 
 
 def get_recommended_score_adjustment(symbol: str, side: str, strategy: str, regime: str) -> Dict[str, Any]:
     bucket = get_bucket_stats(symbol, side, strategy, regime)
-    bucket_trades = int(bucket.get("trades", 0) or 0)
-    bucket_score = float(bucket.get("weighted_score", 0.0) or 0.0)
-    symbol_side_score = float(get_symbol_side_score(symbol, side) or 0.0)
-    global_score = float(get_global_score() or 0.0)
+    bucket_trades = _to_int(bucket.get("trades", 0), 0)
+    bucket_score = _to_float(bucket.get("weighted_score", 0.0), 0.0)
+    symbol_side_score = _to_float(get_symbol_side_score(symbol, side), 0.0)
+    global_score = _to_float(get_global_score(), 0.0)
 
     # minimum sample guard
     min_bucket = 3
@@ -237,8 +402,8 @@ def get_recommended_score_adjustment(symbol: str, side: str, strategy: str, regi
 
 def check_winrate_milestone() -> Optional[str]:
     stats = get_ai_stats()
-    trades = int(stats.get("trades", 0) or 0)
-    winrate = float(stats.get("winrate", 0.0) or 0.0)
+    trades = _to_int(stats.get("trades", 0), 0)
+    winrate = _to_float(stats.get("winrate", 0.0), 0.0)
     if trades < 20:
         return None
     if winrate >= 70.0:
@@ -252,60 +417,24 @@ def get_ai_stats() -> Dict[str, Any]:
     data = _load()
     g = data.get("global", {})
     gd = data.get("global_detail", {})
-    trades = int(g.get("trades", 0) or 0)
-    wins = int(g.get("wins", 0) or 0)
-    losses = int(g.get("losses", 0) or 0)
+    if not isinstance(g, dict):
+        g = {}
+    if not isinstance(gd, dict):
+        gd = {}
+    trades = _to_int(g.get("trades", 0), 0)
+    wins = _to_int(g.get("wins", 0), 0)
+    losses = _to_int(g.get("losses", 0), 0)
     winrate = (wins / trades * 100.0) if trades > 0 else 0.0
-    detail_trades = int(gd.get("trades", 0) or 0)
-    detail_wins = int(gd.get("wins", 0) or 0)
+    detail_trades = _to_int(gd.get("trades", 0), 0)
+    detail_wins = _to_int(gd.get("wins", 0), 0)
     detail_winrate = (detail_wins / detail_trades * 100.0) if detail_trades > 0 else 0.0
     return {
         "trades": trades,
         "wins": wins,
         "losses": losses,
         "winrate": round(winrate, 2),
-        "pnl_sum": round(float(g.get("pnl_sum", 0.0) or 0.0), 4),
+        "pnl_sum": round(_to_float(g.get("pnl_sum", 0.0), 0.0), 4),
         "detail_trades": detail_trades,
         "detail_winrate": round(detail_winrate, 2),
         "global_score": round(get_global_score(), 4),
     }
-# ===== ADVANCED AI WEIGHT PATCH =====
-try:
-    import math
-    
-    def _ai_symbol_weight(symbol, winrate, trades):
-        try:
-            if trades < 5:
-                return 1.0
-            
-            if winrate > 0.65:
-                return 1.3
-            elif winrate > 0.55:
-                return 1.15
-            elif winrate < 0.40:
-                return 0.8
-            else:
-                return 1.0
-        except:
-            return 1.0
-
-    _orig_score_ai = globals().get("ai_score_adjust")
-
-    if callable(_orig_score_ai):
-        def ai_score_adjust(score, symbol=None, stats=None):
-            base = _orig_score_ai(score, symbol, stats)
-            
-            try:
-                if stats:
-                    wr = stats.get("winrate", 0.5)
-                    trades = stats.get("trades", 0)
-                    
-                    w = _ai_symbol_weight(symbol, wr, trades)
-                    return base * w
-            except:
-                pass
-
-            return base
-
-except Exception:
-    pass
