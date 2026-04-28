@@ -3672,7 +3672,7 @@ try:
             return {"ETHUSDT"}
         return {x.strip().upper() for x in raw.split(",") if x.strip()}
 
-    _ETH_HARD_ON = _eth_hard_bool("HARDENING_ON", True)
+    _ETH_HARD_ON = _eth_hard_bool("ETH_HARDENING_ON", False)
     _ETH_HARD_TARGETS = _eth_hard_targets()
 
     # -----------------------------------------------------
@@ -3682,6 +3682,9 @@ try:
     if callable(_orig_init_eth_hard):
         def _eth_hard_init(self, *args, **kwargs):
             _orig_init_eth_hard(self, *args, **kwargs)
+
+            if not _ETH_HARD_ON:
+                return
 
             try:
                 # low RSI 회피는 항상 켠다
@@ -3710,6 +3713,9 @@ try:
 
             try:
                 if not isinstance(mp, dict):
+                    return mp
+
+                if not _ETH_HARD_ON:
                     return mp
 
                 fixed = str(_eth_hard_os.getenv("FIXED_SYMBOL", "")).upper()
@@ -4513,82 +4519,9 @@ try:
 except Exception as e:
     print("ULTIMATE FUSION PATCH FAIL:", e)
 # =========================
-# 🔥 AI CAPITAL MANAGER
-# =========================
-
-try:
-    if not hasattr(Trader, "_ai_capital"):
-        Trader._ai_capital = {
-            "size_mult": 1.0,
-            "lev": 15,
-            "win_streak": 0,
-            "lose_streak": 0
-        }
-
-    def _ai_adjust(self, pnl):
-        cap = self._ai_capital
-
-        if pnl > 0:
-            cap["win_streak"] += 1
-            cap["lose_streak"] = 0
-            cap["size_mult"] = min(cap["size_mult"] * 1.1, 2.0)
-            cap["lev"] = min(cap["lev"] + 1, 30)
-
-        else:
-            cap["lose_streak"] += 1
-            cap["win_streak"] = 0
-            cap["size_mult"] = max(cap["size_mult"] * 0.8, 0.3)
-            cap["lev"] = max(cap["lev"] - 2, 5)
-
-    # ---------- entry hook ----------
-    _orig_entry = getattr(Trader, "_entry", None)
-
-    if callable(_orig_entry):
-        def _patched_entry(self, symbol, *args, **kwargs):
-            cap = self._ai_capital
-
-            # 비중 조절
-            if "qty" in kwargs:
-                kwargs["qty"] *= cap["size_mult"]
-
-            # 레버리지 적용
-            if hasattr(self, "mode"):
-                if not hasattr(self, "_mp"):
-                    pass
-                else:
-                    try:
-                        mp = self._mp()
-                        mp["lev"] = cap["lev"]
-                    except:
-                        pass
-
-            return _orig_entry(self, symbol, *args, **kwargs)
-
-        Trader._entry = _patched_entry
-
-    # ---------- exit hook ----------
-    _orig_exit = getattr(Trader, "_exit_position", None)
-
-    if callable(_orig_exit):
-        def _patched_exit(self, idx, why, *a, **k):
-            try:
-                pos = self.positions[idx]
-                entry = pos.get("entry_price", 0)
-                price = self._get_price(pos["symbol"])
-                pnl = (price - entry) * pos.get("qty", 0)
-                if pos.get("side") == "SHORT":
-                    pnl *= -1
-
-                self._ai_adjust(pnl)
-            except:
-                pass
-
-            return _orig_exit(self, idx, why, *a, **k)
-
-        Trader._exit_position = _patched_exit
-
-except Exception as e:
-    print("AI CAPITAL PATCH FAIL:", e)
+# AI CAPITAL MANAGER removed by stability cleanup.
+# Reason: it auto-scaled leverage/size and wrapped exit hooks out of order.
+# Keep position sizing/leverage controlled by .env, _mp(), risk_engine, and Telegram commands.
 # =========================
 # 🔥 CIRCUIT BREAKER AUTO RECOVER PATCH
 # =========================
@@ -5265,7 +5198,7 @@ try:
             pass
 
     def _kg_kulamagic_signal(self, df=None):
-        if not _kg_env_bool("KULA_ON", True):
+        if not _kg_env_bool("KULA_ON", False):
             return {
                 "ok": False,
                 "long_ok": False,
@@ -5294,7 +5227,7 @@ try:
         def _wrapped(self, *args, **kwargs):
             base = orig(self, *args, **kwargs)
             try:
-                if not _kg_env_bool("KULA_ON", True):
+                if not _kg_env_bool("KULA_ON", False):
                     return base
 
                 df = _kg_find_df(self, *args, **kwargs)
@@ -5351,9 +5284,9 @@ try:
         def _wrapped(self, *args, **kwargs):
             base = orig(self, *args, **kwargs)
             try:
-                if not _kg_env_bool("KULA_ON", True):
+                if not _kg_env_bool("KULA_ON", False):
                     return base
-                if not _kg_env_bool("KULA_HARD_FILTER", True):
+                if not _kg_env_bool("KULA_HARD_FILTER", False):
                     return base
 
                 ok_base = bool(base)
@@ -5450,7 +5383,7 @@ try:
                 try:
                     sig = self.kulamagic_signal()
                     extra = []
-                    extra.append(f"🎯 KULA={'ON' if _kg_env_bool('KULA_ON', True) else 'OFF'} HARD={'ON' if _kg_env_bool('KULA_HARD_FILTER', True) else 'OFF'}")
+                    extra.append(f"🎯 KULA={'ON' if _kg_env_bool('KULA_ON', False) else 'OFF'} HARD={'ON' if _kg_env_bool('KULA_HARD_FILTER', False) else 'OFF'}")
                     extra.append(f"📦 boxH={sig.get('box_high')} boxL={sig.get('box_low')}")
                     extra.append(f"🧠 kula_reason={sig.get('reason', 'KULA_NA')}")
                     return str(txt) + "\n" + "\n".join(extra)
@@ -5725,7 +5658,7 @@ try:
             except Exception:
                 pass
             try:
-                lines.append(f"kula={_kg_env_bool('KULA_ON', True)} hard={_kg_env_bool('KULA_HARD_FILTER', True)} reason={st.get('last_kula_reason', '-')}")
+                lines.append(f"kula={_kg_env_bool('KULA_ON', False)} hard={_kg_env_bool('KULA_HARD_FILTER', False)} reason={st.get('last_kula_reason', '-')}")
             except Exception:
                 pass
 
