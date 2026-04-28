@@ -5473,3 +5473,343 @@ except Exception as _kula_patch_e:
 # =========================
 # END KULAMAGI PATCH
 # =========================
+
+# =========================
+# STABILITY_PATCH_V2 - ops/why/decision-log patch
+# - detailed /why
+# - decision_logger integration
+# - trade_journal integration
+# - safe append-only monkey patch; trading logic unchanged
+# =========================
+try:
+    import os as _v2_os
+    import time as _v2_time
+
+    try:
+        from decision_logger import log_decision as _v2_log_decision, tail_decisions as _v2_tail_decisions, decision_log_path as _v2_decision_log_path
+    except Exception:
+        def _v2_log_decision(*a, **k): return False
+        def _v2_tail_decisions(*a, **k): return []
+        def _v2_decision_log_path(): return "-"
+
+    try:
+        from trade_journal import log_trade_event as _v2_log_trade_event, trade_journal_path as _v2_trade_journal_path
+    except Exception:
+        def _v2_log_trade_event(*a, **k): return False
+        def _v2_trade_journal_path(): return "-"
+
+    def _v2_float(x, default=None):
+        try:
+            if x is None:
+                return default
+            return float(x)
+        except Exception:
+            return default
+
+    def _v2_int(x, default=0):
+        try:
+            return int(float(x))
+        except Exception:
+            return default
+
+    def _v2_clip(s, n=96):
+        try:
+            s = str(s or "").replace("\n", " | ").strip()
+        except Exception:
+            s = ""
+        if len(s) > n:
+            return s[: max(0, n - 1)] + "…"
+        return s
+
+    def _v2_now_age(ts):
+        try:
+            ts = float(ts or 0)
+            if ts <= 0:
+                return "-"
+            return f"{max(0, int(_v2_time.time() - ts))}s ago"
+        except Exception:
+            return "-"
+
+    def _v2_ensure_state(self):
+        try:
+            if not hasattr(self, "state") or not isinstance(self.state, dict):
+                self.state = {}
+            return self.state
+        except Exception:
+            return {}
+
+    if not getattr(Trader, "_stability_v2_applied", False):
+        Trader._stability_v2_applied = True
+
+        _v2_prev_score_symbol = getattr(Trader, "_score_symbol", None)
+        if callable(_v2_prev_score_symbol):
+            def _v2_score_symbol(self, symbol: str, price: float, *args, **kwargs):
+                ts = int(_v2_time.time())
+                try:
+                    info = _v2_prev_score_symbol(self, symbol, price, *args, **kwargs)
+                except Exception as e:
+                    try:
+                        st = _v2_ensure_state(self)
+                        rec = {
+                            "ts": ts,
+                            "symbol": str(symbol or "").upper(),
+                            "price": _v2_float(price, 0.0),
+                            "ok": False,
+                            "reason": f"SCORE_ERR:{e}",
+                        }
+                        st.setdefault("last_decisions", []).append(rec)
+                        st["last_decisions"] = st.get("last_decisions", [])[-40:]
+                        st["last_decision_ts"] = ts
+                        st["last_skip_reason"] = rec["reason"]
+                        _v2_log_decision("score_error", **rec)
+                    except Exception:
+                        pass
+                    raise
+
+                try:
+                    st = _v2_ensure_state(self)
+                    info_d = dict(info) if isinstance(info, dict) else {"raw": repr(info)}
+                    try:
+                        mp = self._mp()
+                    except Exception:
+                        mp = {}
+                    need = _v2_float(mp.get("enter_score"), None)
+                    score = _v2_float(info_d.get("score"), None)
+                    ok = bool(info_d.get("ok", False))
+                    side = str(info_d.get("side") or "-").upper()
+                    reason = str(info_d.get("reason") or "")
+                    shortage = None
+                    if score is not None and need is not None:
+                        shortage = round(float(need) - float(score), 4)
+
+                    rec = {
+                        "ts": ts,
+                        "symbol": str(symbol or "").upper(),
+                        "side": side,
+                        "price": _v2_float(price, 0.0),
+                        "ok": ok,
+                        "score": score,
+                        "need": need,
+                        "shortage": shortage,
+                        "strategy": info_d.get("strategy") or "-",
+                        "reason": _v2_clip(reason, 220),
+                        "mtf": ((st.get("mtf") or {}).get("trend") if isinstance(st.get("mtf"), dict) else None),
+                        "kula": st.get("last_kula_reason"),
+                    }
+                    arr = st.setdefault("last_decisions", [])
+                    arr.append(rec)
+                    st["last_decisions"] = arr[-50:]
+                    st["last_decision_ts"] = ts
+                    if not ok and reason:
+                        st["last_skip_reason"] = _v2_clip(reason, 180)
+                    _v2_log_decision("score", **rec)
+                except Exception:
+                    pass
+                return info
+            Trader._score_symbol = _v2_score_symbol
+
+        _v2_prev_enter = getattr(Trader, "_enter", None)
+        if callable(_v2_prev_enter):
+            def _v2_enter(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float, strategy: str = "", score: float = 0.0, atr: float = 0.0, *args, **kwargs):
+                try:
+                    _v2_log_decision("enter_attempt", symbol=symbol, side=side, price=price, reason=_v2_clip(reason, 260), sl=sl, tp=tp, strategy=strategy, score=score, atr=atr)
+                    _v2_log_trade_event("enter_attempt", symbol=symbol, side=side, price=price, reason=_v2_clip(reason, 260), sl=sl, tp=tp, strategy=strategy, score=score, atr=atr)
+                except Exception:
+                    pass
+                try:
+                    rv = _v2_prev_enter(self, symbol, side, price, reason, sl, tp, strategy, score, atr, *args, **kwargs)
+                    try:
+                        _v2_log_trade_event("enter_done", symbol=symbol, side=side, price=price, strategy=strategy, score=score, positions=len(getattr(self, "positions", []) or []))
+                    except Exception:
+                        pass
+                    return rv
+                except Exception as e:
+                    try:
+                        _v2_log_decision("enter_error", symbol=symbol, side=side, price=price, strategy=strategy, score=score, error=str(e))
+                        _v2_log_trade_event("enter_error", symbol=symbol, side=side, price=price, strategy=strategy, score=score, error=str(e))
+                    except Exception:
+                        pass
+                    raise
+            Trader._enter = _v2_enter
+
+        _v2_prev_exit = getattr(Trader, "_exit_position", None)
+        if callable(_v2_prev_exit):
+            def _v2_exit_position(self, idx: int, why: str, force=False, *args, **kwargs):
+                pos_snapshot = {}
+                try:
+                    pos = (getattr(self, "positions", []) or [])[idx]
+                    if isinstance(pos, dict):
+                        pos_snapshot = dict(pos)
+                except Exception:
+                    pos_snapshot = {}
+                try:
+                    _v2_log_trade_event("exit_attempt", idx=idx, why=why, force=force, position=pos_snapshot)
+                except Exception:
+                    pass
+                try:
+                    rv = _v2_prev_exit(self, idx, why, force=force, *args, **kwargs)
+                    try:
+                        _v2_log_trade_event("exit_done", idx=idx, why=why, force=force, position=pos_snapshot, day_profit=getattr(self, "day_profit", None), win=getattr(self, "win", None), loss=getattr(self, "loss", None))
+                    except Exception:
+                        pass
+                    return rv
+                except Exception as e:
+                    try:
+                        _v2_log_trade_event("exit_error", idx=idx, why=why, force=force, position=pos_snapshot, error=str(e))
+                    except Exception:
+                        pass
+                    raise
+            Trader._exit_position = _v2_exit_position
+
+        _v2_prev_tick = getattr(Trader, "tick", None)
+        if callable(_v2_prev_tick):
+            def _v2_tick(self, *args, **kwargs):
+                before_event = ""
+                try:
+                    before_event = str((getattr(self, "state", {}) or {}).get("last_event", "") or "")
+                except Exception:
+                    before_event = ""
+                try:
+                    rv = _v2_prev_tick(self, *args, **kwargs)
+                    try:
+                        st = _v2_ensure_state(self)
+                        after_event = str(st.get("last_event", "") or "")
+                        if after_event and after_event != before_event and after_event.startswith("대기"):
+                            _v2_log_decision("gate", reason=after_event, last_skip=st.get("last_skip_reason"), mode=getattr(self, "mode", None), trading_enabled=getattr(self, "trading_enabled", None))
+                    except Exception:
+                        pass
+                    return rv
+                except Exception as e:
+                    try:
+                        _v2_log_decision("tick_error", error=str(e), mode=getattr(self, "mode", None), trading_enabled=getattr(self, "trading_enabled", None))
+                    except Exception:
+                        pass
+                    raise
+            Trader.tick = _v2_tick
+
+        def _v2_why_text(self):
+            try:
+                mp = self._mp()
+            except Exception:
+                mp = {}
+            st = _v2_ensure_state(self)
+            last_scan = st.get("last_scan") or {}
+            reasons = last_scan.get("reasons") or []
+            picked = last_scan.get("picked")
+            decisions = list(st.get("last_decisions") or [])
+            mtf = st.get("mtf") if isinstance(st.get("mtf"), dict) else {}
+            last_skip = str(getattr(self, "_last_skip_reason", "") or st.get("last_skip_reason", "") or "")
+            last_event = str(st.get("last_event", "") or "")
+            try:
+                cooldown_left = max(0, int(float(getattr(self, "_cooldown_until", 0) or 0) - _v2_time.time()))
+            except Exception:
+                cooldown_left = 0
+            try:
+                allowed_now = entry_allowed_now_utc()
+            except Exception:
+                allowed_now = "?"
+            try:
+                pos_n = len(getattr(self, "positions", []) or [])
+            except Exception:
+                pos_n = 0
+
+            lines = []
+            lines.append("🔍 WHY / 진입 판단")
+            lines.append(f"ON={bool(getattr(self, 'trading_enabled', False))} | MODE={getattr(self, 'mode', '-')} | DRY_RUN={DRY_RUN}")
+            lines.append(f"score>={mp.get('enter_score', '-')} | lev={mp.get('lev', '-')} | usdt={mp.get('order_usdt', '-')} | pos={pos_n}/{getattr(self, 'max_positions', '-')}")
+            lines.append(f"AUTO={getattr(self, 'auto_symbol', '-')} | DISC={getattr(self, 'auto_discovery', '-')} | DIV={getattr(self, 'diversify', '-')} | universe={len(getattr(self, 'symbols', []) or [])}")
+            lines.append(f"allowed_now={allowed_now} | cooldown={cooldown_left}s | day_entries={getattr(self, '_day_entries', 0)}/{MAX_ENTRIES_PER_DAY}")
+            lines.append(f"filters: MTF={USE_MTF_FILTER}({mtf.get('trend','-')}) LIQ={USE_LIQUIDITY_FILTER} spread<={MAX_SPREAD_BPS}bps avoidRSI={bool(st.get('avoid_low_rsi', False))}")
+            try:
+                lines.append(f"hard={globals().get('HARDENING_ON', '-')} adx>={globals().get('HARD_MIN_ADX', '-')} atr%={globals().get('HARD_MIN_ATR_PCT', '-')}-{globals().get('HARD_MAX_ATR_PCT', '-')}")
+            except Exception:
+                pass
+            try:
+                lines.append(f"kula={_kg_env_bool('KULA_ON', True)} hard={_kg_env_bool('KULA_HARD_FILTER', True)} reason={st.get('last_kula_reason', '-')}")
+            except Exception:
+                pass
+
+            blockers = []
+            if not bool(getattr(self, 'trading_enabled', False)):
+                blockers.append("거래 OFF")
+            if pos_n >= int(getattr(self, 'max_positions', 1) or 1):
+                blockers.append("MAX_POSITIONS 도달")
+            if cooldown_left > 0:
+                blockers.append(f"쿨다운 {cooldown_left}s")
+            if allowed_now is False:
+                blockers.append(f"시간필터 UTC {TRADE_HOURS_UTC}")
+            if int(getattr(self, '_day_entries', 0) or 0) >= int(MAX_ENTRIES_PER_DAY):
+                blockers.append("일일 진입 제한")
+            if blockers:
+                lines.append("🚫 즉시차단: " + ", ".join(blockers))
+
+            if last_skip:
+                lines.append(f"last_skip={_v2_clip(last_skip, 120)}")
+            if last_event:
+                lines.append(f"last_event={_v2_clip(last_event, 120)}")
+
+            if picked:
+                try:
+                    lines.append(f"picked={picked.get('symbol')} {picked.get('side')} score={picked.get('score')} strategy={picked.get('strategy','-')}")
+                except Exception:
+                    lines.append(f"picked={_v2_clip(picked, 100)}")
+            else:
+                lines.append("picked=None")
+
+            # Top current decisions by score, keeping recent scan records.
+            fresh = []
+            now = _v2_time.time()
+            for r in decisions:
+                try:
+                    if now - float(r.get("ts", 0) or 0) <= 600:
+                        fresh.append(r)
+                except Exception:
+                    pass
+            if fresh:
+                def _sort_key(r):
+                    sc = _v2_float(r.get("score"), -9999.0)
+                    okv = 1 if r.get("ok") else 0
+                    return (okv, sc if sc is not None else -9999.0)
+                top = sorted(fresh[-30:], key=_sort_key, reverse=True)[:10]
+                lines.append("최근 후보 TOP:")
+                for r in top:
+                    sc = r.get("score")
+                    need = r.get("need")
+                    shortage = r.get("shortage")
+                    status = "OK" if r.get("ok") else "NO"
+                    lack = ""
+                    try:
+                        if shortage is not None and float(shortage) > 0:
+                            lack = f" 부족 {float(shortage):.0f}"
+                    except Exception:
+                        pass
+                    lines.append(f"- {r.get('symbol','-')} {r.get('side','-')} {status} {sc}/{need}{lack} {r.get('strategy','-')} | {_v2_clip(r.get('reason'), 68)}")
+            elif reasons:
+                lines.append("최근 스캔 차단/탈락:")
+                for r in reasons[:12]:
+                    lines.append(f"- {_v2_clip(r, 100)}")
+            else:
+                lines.append("최근 스캔 기록 없음. /status 후 1~2틱 뒤 /why")
+
+            try:
+                lines.append(f"log=decisions.jsonl | age={_v2_now_age(st.get('last_decision_ts'))}")
+            except Exception:
+                pass
+            return "\n".join(lines)
+
+        Trader.why_text = _v2_why_text
+
+        try:
+            print("[STABILITY_PATCH_V2] loaded decision_logger=True detailed_why=True")
+        except Exception:
+            pass
+
+except Exception as _stability_v2_e:
+    try:
+        print("[STABILITY_PATCH_V2] load fail:", _stability_v2_e)
+    except Exception:
+        pass
+# =========================
+# END STABILITY_PATCH_V2
+# =========================
+
