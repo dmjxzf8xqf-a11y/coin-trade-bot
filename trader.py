@@ -6431,3 +6431,879 @@ except Exception as _why3_e:
 # =========================
 # END WHY DETAIL PATCH V3
 # =========================
+
+# ============================================================
+# OPS 100 PATCH V1 - health / symbol why / orders / syncpos / guard
+# Safe operational upgrade: diagnostics only by default, no risky strategy changes.
+# ============================================================
+try:
+    import os as _ops_os
+    import time as _ops_time
+    import json as _ops_json
+    import socket as _ops_socket
+
+    def _ops_env_bool(k, default=False):
+        try:
+            v = str(_ops_os.getenv(str(k), "" if default is None else str(default))).strip().lower()
+            if v in ("1", "true", "yes", "y", "on"):
+                return True
+            if v in ("0", "false", "no", "n", "off"):
+                return False
+            return bool(default)
+        except Exception:
+            return bool(default)
+
+    def _ops_float(x, default=None):
+        try:
+            if x is None or x == "":
+                return default
+            return float(x)
+        except Exception:
+            return default
+
+    def _ops_int(x, default=0):
+        try:
+            return int(float(x))
+        except Exception:
+            return default
+
+    def _ops_clip(x, n=120):
+        s = str(x if x is not None else "-").replace("\n", " ").strip()
+        return s if len(s) <= n else s[: max(0, n - 1)] + "…"
+
+    def _ops_money(x):
+        v = _ops_float(x, None)
+        if v is None:
+            return "-"
+        av = abs(v)
+        if av >= 1_000_000_000:
+            return f"{v/1_000_000_000:.2f}B"
+        if av >= 1_000_000:
+            return f"{v/1_000_000:.2f}M"
+        if av >= 1_000:
+            return f"{v/1_000:.2f}K"
+        return f"{v:.2f}"
+
+    def _ops_age(ts):
+        try:
+            d = int(_ops_time.time() - float(ts))
+            if d < 0:
+                d = 0
+            if d < 60:
+                return f"{d}s"
+            if d < 3600:
+                return f"{d//60}m{d%60}s"
+            return f"{d//3600}h{(d%3600)//60}m"
+        except Exception:
+            return "-"
+
+    def _ops_symbol(s):
+        raw = str(s or "").upper().replace("/", "").replace("-", "").strip()
+        raw = "".join(ch for ch in raw if ch.isalnum())
+        if raw and not raw.endswith("USDT") and len(raw) <= 10:
+            raw += "USDT"
+        return raw
+
+    def _ops_decisions_path():
+        try:
+            return data_path("decisions.jsonl")
+        except Exception:
+            return "decisions.jsonl"
+
+    def _ops_read_jsonl_tail(path, max_lines=500):
+        out = []
+        try:
+            if not path or not _ops_os.path.exists(path):
+                return out
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()[-int(max_lines):]
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(_ops_json.loads(line))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return out
+
+    def _ops_market(symbol):
+        sym = _ops_symbol(symbol)
+        out = {"symbol": sym, "ok": False}
+        try:
+            t = get_ticker(sym) or {}
+            bid = _ops_float(t.get("bid1Price"), 0.0) or 0.0
+            ask = _ops_float(t.get("ask1Price"), 0.0) or 0.0
+            last = _ops_float(t.get("lastPrice"), None)
+            mark = _ops_float(t.get("markPrice"), None)
+            turnover = _ops_float(t.get("turnover24h"), 0.0) or 0.0
+            sp_bps = None
+            if bid > 0 and ask > 0:
+                mid = (bid + ask) / 2.0
+                sp_bps = ((ask - bid) / mid) * 10000.0 if mid > 0 else None
+            min_turn = _ops_float(globals().get("MIN_TURNOVER24H_USDT", 0), 0.0) or 0.0
+            max_sp = _ops_float(globals().get("MAX_SPREAD_BPS", 0), 0.0) or 0.0
+            out.update({
+                "ok": True,
+                "price": mark if mark is not None else last,
+                "last": last,
+                "mark": mark,
+                "bid": bid,
+                "ask": ask,
+                "turnover": turnover,
+                "min_turn": min_turn,
+                "turn_ok": (turnover >= min_turn) if min_turn > 0 else True,
+                "spread_bps": sp_bps,
+                "max_spread_bps": max_sp,
+                "spread_ok": (sp_bps is None or max_sp <= 0 or sp_bps <= max_sp),
+            })
+        except Exception as e:
+            out["error"] = _ops_clip(e, 120)
+        return out
+
+    def _ops_market_line(m):
+        try:
+            if not isinstance(m, dict) or not m.get("ok"):
+                return f"market=ERR {m.get('error','-') if isinstance(m,dict) else '-'}"
+            sp = m.get("spread_bps")
+            return (
+                f"turn={_ops_money(m.get('turnover'))}/{_ops_money(m.get('min_turn'))} "
+                f"{'OK' if m.get('turn_ok') else 'NO'} | "
+                f"spread={(f'{sp:.2f}' if sp is not None else '-')}bps/{m.get('max_spread_bps','-')} "
+                f"{'OK' if m.get('spread_ok') else 'NO'} | price={m.get('price','-')}"
+            )
+        except Exception as e:
+            return f"market_line_err={_ops_clip(e)}"
+
+    def _ops_real_positions():
+        arr = []
+        try:
+            if DRY_RUN:
+                return arr
+            for p in get_positions_all() or []:
+                size = _ops_float(p.get("size"), 0.0) or 0.0
+                if size <= 0:
+                    continue
+                sym = str(p.get("symbol") or "").upper()
+                ex_side = str(p.get("side") or "")
+                side = "LONG" if ex_side.lower() == "buy" else "SHORT" if ex_side.lower() == "sell" else ex_side.upper()
+                entry = _ops_float(p.get("avgPrice") or p.get("entryPrice"), 0.0) or 0.0
+                arr.append({"symbol": sym, "side": side, "size": size, "entry": entry})
+        except Exception as e:
+            return {"error": str(e), "items": arr}
+        return arr
+
+    def _ops_internal_positions(self):
+        arr = []
+        try:
+            for p in getattr(self, "positions", []) or []:
+                if not isinstance(p, dict):
+                    continue
+                arr.append({
+                    "symbol": str(p.get("symbol") or "").upper(),
+                    "side": str(p.get("side") or "").upper(),
+                    "entry": _ops_float(p.get("entry_price"), None),
+                    "stop": _ops_float(p.get("stop_price"), None),
+                    "tp": _ops_float(p.get("tp_price"), None),
+                })
+        except Exception:
+            pass
+        return arr
+
+    def _ops_health_text(self):
+        lines = []
+        lines.append("🩺 HEALTH+ / 운영 헬스체크")
+        try:
+            mp = self._mp()
+        except Exception:
+            mp = {}
+        lines.append(f"bot=ALIVE | ON={bool(getattr(self,'trading_enabled',False))} | mode={getattr(self,'mode','-')} | dry={DRY_RUN}")
+        lines.append(f"lev={mp.get('lev','-')} | usdt={mp.get('order_usdt','-')} | score>={mp.get('enter_score','-')}")
+        lines.append(f"base={BYBIT_BASE_URL} | proxy={'ON' if PROXIES else 'OFF'} | settle={SETTLE_COIN}")
+
+        # loop age
+        last_tick = getattr(self, "state", {}).get("ops_last_tick_ts") or getattr(self, "state", {}).get("runtime_saved_ts")
+        lines.append(f"loop_age={_ops_age(last_tick) if last_tick else '-'} | cooldown={max(0, int(float(getattr(self,'_cooldown_until',0) or 0)-_ops_time.time()))}s | cb_err={int(getattr(self,'_cb_err_count',0) or 0)}")
+
+        # Bybit quick check
+        try:
+            bt = get_ticker("BTCUSDT") or {}
+            ok = bool(bt.get("symbol"))
+            lines.append(f"Bybit={'OK' if ok else 'NO'} | BTC={bt.get('lastPrice') or bt.get('markPrice') or '-'}")
+        except Exception as e:
+            lines.append(f"Bybit=ERR {_ops_clip(e, 90)}")
+
+        # Telegram config check only; do not send test spam
+        lines.append(f"Telegram={'OK' if (BOT_TOKEN and CHAT_ID) else 'NO'} | token={bool(BOT_TOKEN)} chat={bool(CHAT_ID)}")
+
+        # filesystem checks
+        try:
+            dd = data_dir()
+        except Exception:
+            dd = "data"
+        dpath = _ops_decisions_path()
+        try:
+            _ops_os.makedirs(_ops_os.path.dirname(dpath) or ".", exist_ok=True)
+            with open(dpath, "a", encoding="utf-8") as f:
+                pass
+            dec_ok = True
+        except Exception:
+            dec_ok = False
+        lines.append(f"data_dir={dd} | writable={'OK' if dec_ok else 'NO'} | decisions={dpath}")
+
+        # port check
+        port = _ops_int(_ops_os.getenv("PORT", "8080"), 8080)
+        try:
+            s = _ops_socket.socket(_ops_socket.AF_INET, _ops_socket.SOCK_STREAM)
+            s.settimeout(0.4)
+            port_open = (s.connect_ex(("127.0.0.1", port)) == 0)
+            s.close()
+            lines.append(f"port{port}={'OPEN' if port_open else 'not-listening'}")
+        except Exception as e:
+            lines.append(f"port{port}=ERR {_ops_clip(e,80)}")
+
+        # position sync check
+        real = _ops_real_positions()
+        internal = _ops_internal_positions(self)
+        if isinstance(real, dict):
+            lines.append(f"positions internal={len(internal)} | real=ERR {_ops_clip(real.get('error'),80)}")
+        else:
+            rset = {(x.get('symbol'), x.get('side')) for x in real}
+            iset = {(x.get('symbol'), x.get('side')) for x in internal}
+            miss_real = sorted(list(rset - iset))
+            ghost = sorted(list(iset - rset))
+            lines.append(f"positions internal={len(internal)} | real={len(real)} | sync={'OK' if not miss_real and not ghost else 'CHECK'}")
+            if miss_real:
+                lines.append("real_only=" + ", ".join([f"{a}/{b}" for a,b in miss_real[:5]]))
+            if ghost:
+                lines.append("bot_only=" + ", ".join([f"{a}/{b}" for a,b in ghost[:5]]))
+
+        # risk snapshot
+        try:
+            lines.append(f"risk consec_loss={int(getattr(self,'consec_losses',0) or 0)} | day_pnl≈{float(getattr(self,'daily_pnl',0.0) or 0.0):.2f} | day_entries={int(getattr(self,'_day_entries',0) or 0)}/{MAX_ENTRIES_PER_DAY}")
+        except Exception:
+            pass
+        return "\n".join(lines[:24])
+
+    def _ops_why_symbol_text(self, symbol):
+        sym = _ops_symbol(symbol)
+        if not sym:
+            return "❌ 사용법: /why DOGEUSDT"
+        lines = [f"🔎 WHY+ SYMBOL / {sym}"]
+        try:
+            mp = self._mp()
+        except Exception:
+            mp = {}
+        enter_score = _ops_float(mp.get("enter_score"), 0.0) or 0.0
+        lines.append(f"ON={bool(getattr(self,'trading_enabled',False))} | mode={getattr(self,'mode','-')} | score>={enter_score:g} | dry={DRY_RUN}")
+        m = _ops_market(sym)
+        lines.append(_ops_market_line(m))
+        try:
+            price = _ops_float(m.get("price"), None) if isinstance(m, dict) else None
+            if price is None or price <= 0:
+                price = get_price(sym)
+            info = self._score_symbol(sym, float(price)) or {}
+            score = _ops_float(info.get("score"), None)
+            ok = bool(info.get("ok")) and (score is not None and score >= enter_score)
+            side = str(info.get("side") or "-").upper()
+            reason = _ops_clip(info.get("reason"), 360)
+            lines.append(f"signal={side} | raw_ok={bool(info.get('ok'))} | score={score if score is not None else '-'}/{enter_score:g} | final={'OK' if ok else 'NO'}")
+            lines.append(f"strategy={info.get('strategy','-')} | reason={reason}")
+            if info.get("sl") is not None or info.get("tp") is not None:
+                lines.append(f"sl={info.get('sl')} | tp={info.get('tp')} | atr={info.get('atr','-')}")
+        except Exception as e:
+            lines.append(f"signal=ERR {_ops_clip(e, 180)}")
+
+        # Additional final blockers outside score_symbol
+        blockers = []
+        try:
+            if not bool(getattr(self, "trading_enabled", False)):
+                blockers.append("TRADING_OFF")
+            if len(getattr(self, "positions", []) or []) >= int(getattr(self, "max_positions", 1) or 1):
+                blockers.append("MAX_POSITIONS")
+            cd = max(0, int(float(getattr(self, "_cooldown_until", 0) or 0) - _ops_time.time()))
+            if cd > 0:
+                blockers.append(f"COOLDOWN_{cd}s")
+            if int(getattr(self, "_day_entries", 0) or 0) >= int(globals().get("MAX_ENTRIES_PER_DAY", 999)):
+                blockers.append("MAX_DAILY_ENTRIES")
+            # duplicate internal position
+            for p in getattr(self, "positions", []) or []:
+                if str(p.get("symbol") or "").upper() == sym:
+                    blockers.append("INTERNAL_POSITION_EXISTS")
+                    break
+            # real position exists
+            rsz = get_position_size(sym) if not DRY_RUN else 0.0
+            if rsz and rsz > 0:
+                blockers.append(f"REAL_POSITION_EXISTS size={rsz}")
+        except Exception:
+            pass
+        lines.append("final_blockers=" + (", ".join(blockers) if blockers else "none"))
+        try:
+            mtf = getattr(self, "state", {}).get("mtf") or {}
+            lines.append(f"mtf={mtf.get('trend','-')} | avoidRSI={bool(getattr(self,'state',{}).get('avoid_low_rsi', False))} | kula={_ops_env_bool('KULA_ON', False)}/{_ops_env_bool('KULA_HARD_FILTER', False)}")
+        except Exception:
+            pass
+        return "\n".join(lines[:22])
+
+    def _ops_orders_text(self):
+        path = _ops_decisions_path()
+        recs = _ops_read_jsonl_tail(path, 800)
+        kinds = {"enter_attempt", "enter_result", "enter_error", "exit", "order", "api_error"}
+        filt = [r for r in recs if str(r.get("kind") or r.get("event") or "") in kinds or str(r.get("result") or "").startswith("ENTER")]
+        filt = filt[-12:]
+        lines = ["📜 ORDERS+ / 최근 주문·진입 기록"]
+        lines.append(f"log={path} exists={_ops_os.path.exists(path)} recs={len(recs)}")
+        if not filt:
+            lines.append("최근 주문/진입 기록 없음")
+            return "\n".join(lines)
+        for r in filt:
+            ts = r.get("ts") or r.get("time")
+            kind = str(r.get("kind") or r.get("event") or "-")
+            sym = str(r.get("symbol") or "-").upper()
+            side = str(r.get("side") or "-").upper()
+            result = str(r.get("result") or r.get("block") or r.get("error") or "-")
+            score = r.get("score")
+            lines.append(f"- {_ops_age(ts)} ago | {kind} | {sym} {side} | score={score if score is not None else '-'} | {_ops_clip(result, 90)}")
+        return "\n".join(lines[:18])
+
+    def _ops_syncpos_text(self):
+        lines = ["🔄 SYNCPOS+ / 포지션 동기화 점검"]
+        internal = _ops_internal_positions(self)
+        real = _ops_real_positions()
+        if isinstance(real, dict):
+            lines.append(f"real=ERR {_ops_clip(real.get('error'),160)}")
+            real_items = []
+        else:
+            real_items = real
+        try:
+            self.state["real_positions"] = real_items[:10]
+        except Exception:
+            pass
+        lines.append(f"internal={len(internal)} | real={len(real_items)} | dry={DRY_RUN}")
+        if internal:
+            lines.append("내부 포지션:")
+            for p in internal[:6]:
+                lines.append(f"- {p.get('symbol')} {p.get('side')} entry={p.get('entry')} stop={p.get('stop')} tp={p.get('tp')}")
+        else:
+            lines.append("내부 포지션: NONE")
+        if real_items:
+            lines.append("거래소 포지션:")
+            for p in real_items[:6]:
+                lines.append(f"- {p.get('symbol')} {p.get('side')} size={p.get('size')} entry={p.get('entry')}")
+        else:
+            lines.append("거래소 포지션: NONE")
+        rset = {(x.get('symbol'), x.get('side')) for x in real_items}
+        iset = {(x.get('symbol'), x.get('side')) for x in internal}
+        miss = sorted(list(rset - iset))
+        ghost = sorted(list(iset - rset))
+        if not miss and not ghost:
+            lines.append("판정=SYNC_OK")
+        else:
+            lines.append("판정=SYNC_CHECK")
+            if miss:
+                lines.append("거래소에만 있음: " + ", ".join([f"{a}/{b}" for a,b in miss[:8]]))
+            if ghost:
+                lines.append("봇 내부에만 있음: " + ", ".join([f"{a}/{b}" for a,b in ghost[:8]]))
+            lines.append("주의: 자동 복구는 손절/익절값 누락 위험 때문에 하지 않음. 필요하면 /panic 또는 수동 정리.")
+        return "\n".join(lines[:24])
+
+    def _ops_risk_text(self):
+        try:
+            ai = get_ai_stats() or {}
+        except Exception:
+            ai = {}
+        lines = ["🛡 RISK+ / 리스크 상태"]
+        try:
+            mp = self._mp()
+        except Exception:
+            mp = {}
+        lines.append(f"mode={getattr(self,'mode','-')} | ON={bool(getattr(self,'trading_enabled',False))} | lev={mp.get('lev','-')} | usdt={mp.get('order_usdt','-')}")
+        lines.append(f"consec_losses={int(getattr(self,'consec_losses',0) or 0)}/{MAX_CONSEC_LOSSES} | day_entries={int(getattr(self,'_day_entries',0) or 0)}/{MAX_ENTRIES_PER_DAY}")
+        lines.append(f"day_pnl≈{float(getattr(self,'daily_pnl',0.0) or 0.0):.2f} | cb_err={int(getattr(self,'_cb_err_count',0) or 0)} | cooldown={max(0,int(float(getattr(self,'_cooldown_until',0) or 0)-_ops_time.time()))}s")
+        lines.append(f"AI winrate={ai.get('winrate',0)} | W={ai.get('wins',0)} L={ai.get('losses',0)} | trades={int(ai.get('wins',0) or 0)+int(ai.get('losses',0) or 0)}")
+        lines.append(f"auto_safe={_ops_env_bool('OPS_AUTO_SAFE', True)} | KULA={_ops_env_bool('KULA_ON', False)}/{_ops_env_bool('KULA_HARD_FILTER', False)}")
+        if int(ai.get('wins',0) or 0)+int(ai.get('losses',0) or 0) < 30:
+            lines.append("판정=AI 표본 부족: 자동 레버리지 상승 금지 유지 권장")
+        return "\n".join(lines)
+
+    # Override keyboard after previous patches.
+    def _ops_keyboard():
+        return {
+            "keyboard": [
+                ["▶️ 시작 /start", "⏹️ 중지 /stop"],
+                ["🛡️ 안전 /safe", "⚔️ 공격 /aggro"],
+                ["📊 상태 /status", "🔍 이유 /why", "🩺 헬스 /health"],
+                ["📜 주문 /orders", "🔄 싱크 /syncpos", "🛡 리스크 /risk"],
+                ["🎯 쿨라OFF /kula off", "🎯 쿨라ON /kula on", "🎯 쿨라HARD /kula hard"],
+                ["🧠 RSI회피ON /avoidrsi on", "🧠 RSI회피OFF /avoidrsi off"],
+                ["🟢 매수 /buy", "🔴 숏 /short", "💥 긴급청산 /panic"],
+                ["🎛️ 버튼켜기 /ui on", "🎛️ 버튼끄기 /ui off"],
+            ],
+            "resize_keyboard": True,
+            "one_time_keyboard": False,
+            "is_persistent": True,
+        }
+    globals()["_tg_keyboard"] = _ops_keyboard
+
+    _ops_prev_handle_command = getattr(Trader, "handle_command", None)
+    if callable(_ops_prev_handle_command):
+        def _ops_handle_command(self, text: str):
+            raw = (text or "").strip()
+            parts = raw.split()
+            cmd = ""
+            arg = ""
+            for i, p in enumerate(parts):
+                if p.startswith("/"):
+                    cmd = p.lower().split("@")[0]
+                    arg = " ".join(parts[i+1:])
+                    break
+            if cmd == "/health":
+                self.notify(_ops_health_text(self))
+                return
+            if cmd == "/orders":
+                self.notify(_ops_orders_text(self))
+                return
+            if cmd == "/syncpos":
+                self.notify(_ops_syncpos_text(self))
+                return
+            if cmd == "/risk":
+                self.notify(_ops_risk_text(self))
+                return
+            if cmd == "/why" and arg.strip():
+                self.notify(_ops_why_symbol_text(self, arg.strip().split()[0]))
+                return
+            return _ops_prev_handle_command(self, text)
+        Trader.handle_command = _ops_handle_command
+
+    # Append help text without replacing existing help.
+    _ops_prev_help_text = getattr(Trader, "help_text", None)
+    if callable(_ops_prev_help_text):
+        def _ops_help_text(self):
+            base = _ops_prev_help_text(self)
+            extra = (
+                "\n🧰 운영 안정화+\n"
+                "/health        전체 헬스체크\n"
+                "/why DOGEUSDT  특정 종목 진입 판단\n"
+                "/orders        최근 주문/진입 기록\n"
+                "/syncpos       거래소-봇 포지션 동기화 점검\n"
+                "/risk          리스크/AI 표본 상태\n"
+            )
+            return str(base).rstrip() + "\n" + extra
+        Trader.help_text = _ops_help_text
+
+    # Tick wrapper: update heartbeat + conservative auto-safe. No leverage/order increase.
+    _ops_prev_tick = getattr(Trader, "tick", None)
+    if callable(_ops_prev_tick):
+        def _ops_tick(self, *args, **kwargs):
+            try:
+                self.state["ops_last_tick_ts"] = int(_ops_time.time())
+                if _ops_env_bool("OPS_AUTO_SAFE", True):
+                    if str(getattr(self, "mode", "")).upper() == "AGGRO" and int(getattr(self, "consec_losses", 0) or 0) >= 2:
+                        self.mode = "SAFE"
+                        try:
+                            self._lev_set_cache = {}
+                        except Exception:
+                            pass
+                        self.notify_throttled("🛡 OPS_AUTO_SAFE: 연속손실 2회 이상 → SAFE 자동 전환", 180)
+            except Exception:
+                pass
+            return _ops_prev_tick(self, *args, **kwargs)
+        Trader.tick = _ops_tick
+
+    print("[OPS 100 PATCH V1] loaded /health /why <symbol> /orders /syncpos /risk", flush=True)
+except Exception as _ops_e:
+    try:
+        print("[OPS 100 PATCH V1] load fail:", _ops_e, flush=True)
+    except Exception:
+        pass
+# END OPS 100 PATCH V1
+
+# =========================
+# AI AUTO LEVERAGE SAFE PATCH V1
+# - Adds real but bounded AI-based leverage selection.
+# - Default OFF. Enable with /ailev on or AI_AUTO_LEVERAGE=true.
+# - Never raises leverage during warmup unless AI_AUTO_LEV_WARMUP_RAISE=true.
+# - Uses score + real AI winrate/trade count + safety blockers.
+# =========================
+try:
+    import os as _ailev_os
+    import time as _ailev_time
+
+    def _ailev_bool(v, default=False):
+        if v is None:
+            return bool(default)
+        return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+    def _ailev_env_bool(name, default=False):
+        return _ailev_bool(_ailev_os.getenv(name, str(default)), default)
+
+    def _ailev_env_int(name, default):
+        try:
+            return int(float(str(_ailev_os.getenv(name, str(default))).strip()))
+        except Exception:
+            return int(default)
+
+    def _ailev_env_float(name, default):
+        try:
+            return float(str(_ailev_os.getenv(name, str(default))).strip())
+        except Exception:
+            return float(default)
+
+    def _ailev_set_dotenv_value(name, value):
+        # Prefer existing .env setter from KULA control patch if available.
+        try:
+            fn = globals().get("_ctl_set_dotenv_value")
+            if callable(fn):
+                return bool(fn(name, value))
+        except Exception:
+            pass
+        try:
+            from pathlib import Path as _ailev_Path
+            name = str(name).strip()
+            value = str(value).strip()
+            _ailev_os.environ[name] = value
+            p = _ailev_Path(".env")
+            raw = p.read_text(encoding="utf-8") if p.exists() else ""
+            lines = raw.splitlines()
+            out = []
+            written = False
+            prefix = name + "="
+            for line in lines:
+                if line.strip().startswith(prefix):
+                    if not written:
+                        out.append(f"{name}={value}")
+                        written = True
+                else:
+                    out.append(line)
+            if not written:
+                if out and out[-1].strip() != "":
+                    out.append("")
+                out.append(f"{name}={value}")
+            p.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+            return True
+        except Exception:
+            try:
+                _ailev_os.environ[str(name)] = str(value)
+            except Exception:
+                pass
+            return False
+
+    def _ailev_get_ai_stats_safe():
+        try:
+            ai = get_ai_stats() or {}
+        except Exception:
+            ai = {}
+        try:
+            wins = int(ai.get("wins", 0) or 0)
+        except Exception:
+            wins = 0
+        try:
+            losses = int(ai.get("losses", 0) or 0)
+        except Exception:
+            losses = 0
+        trades = wins + losses
+        try:
+            wr = float(ai.get("winrate", 0) or 0)
+            # ai_learn winrate may be 0~100; tolerate 0~1 too.
+            if 0 < wr <= 1:
+                wr *= 100.0
+        except Exception:
+            wr = (wins / trades * 100.0) if trades else 0.0
+        if trades and wr <= 0:
+            wr = wins / max(1, trades) * 100.0
+        return {"wins": wins, "losses": losses, "trades": trades, "winrate": wr}
+
+    def _ailev_picked_info(self):
+        try:
+            picked = ((getattr(self, "state", {}) or {}).get("last_scan") or {}).get("picked") or {}
+            if not isinstance(picked, dict):
+                picked = {}
+        except Exception:
+            picked = {}
+        return picked
+
+    def _ailev_calc(self, base_mp=None):
+        try:
+            base_mp = dict(base_mp or {})
+        except Exception:
+            base_mp = {}
+
+        try:
+            base_lev = int(float(base_mp.get("lev", 1) or 1))
+        except Exception:
+            base_lev = 1
+
+        enabled = _ailev_env_bool("AI_AUTO_LEVERAGE", False)
+        min_lev = max(1, _ailev_env_int("AI_AUTO_LEV_MIN", max(1, min(base_lev, 3))))
+        max_default = min(_ailev_env_int("GROWTH_LEV_MAX", 12), 12)
+        max_lev = max(min_lev, _ailev_env_int("AI_AUTO_LEV_MAX", max_default))
+        hard_cap = max(min_lev, _ailev_env_int("AI_AUTO_LEV_HARD_CAP", max_lev))
+        max_lev = min(max_lev, hard_cap)
+
+        min_trades = max(0, _ailev_env_int("AI_AUTO_LEV_MIN_TRADES", 30))
+        min_wr = _ailev_env_float("AI_AUTO_LEV_MIN_WR", 60.0)
+        min_score = _ailev_env_float("AI_AUTO_LEV_MIN_SCORE", 82.0)
+        warmup_raise = _ailev_env_bool("AI_AUTO_LEV_WARMUP_RAISE", False)
+
+        ai = _ailev_get_ai_stats_safe()
+        picked = _ailev_picked_info(self)
+        try:
+            score = float(picked.get("score", 0) or 0)
+        except Exception:
+            score = 0.0
+        symbol = str(picked.get("symbol") or "-").upper()
+        side = str(picked.get("side") or "-").upper()
+        strategy = str(picked.get("strategy") or "-")
+        regime = str((getattr(self, "state", {}) or {}).get("last_regime", "-")).lower()
+
+        lev = base_lev
+        reason = []
+
+        try:
+            consec_losses = int(getattr(self, "consec_losses", 0) or 0)
+        except Exception:
+            consec_losses = 0
+        try:
+            cb_err = int(getattr(self, "_cb_err_count", 0) or 0)
+        except Exception:
+            cb_err = 0
+
+        if not enabled:
+            reason.append("OFF")
+        elif cb_err > 0:
+            lev = max(min_lev, min(base_lev, base_lev - 1))
+            reason.append(f"cb_err={cb_err}:no_raise")
+        elif consec_losses >= 2:
+            lev = max(min_lev, base_lev - 2)
+            reason.append(f"consec_losses={consec_losses}:down")
+        elif consec_losses >= 1:
+            lev = max(min_lev, base_lev - 1)
+            reason.append(f"consec_losses={consec_losses}:down")
+        elif ai["trades"] < min_trades and not warmup_raise:
+            lev = base_lev
+            reason.append(f"warmup {ai['trades']}/{min_trades}:base_only")
+        elif ai["trades"] >= min_trades and ai["winrate"] < min_wr:
+            lev = base_lev
+            reason.append(f"wr {ai['winrate']:.1f}%<{min_wr:.1f}%:base_only")
+        elif score < min_score:
+            lev = base_lev
+            reason.append(f"score {score:.1f}<{min_score:.1f}:base_only")
+        elif regime in ("range", "chop", "sideways"):
+            lev = base_lev
+            reason.append(f"regime={regime}:base_only")
+        else:
+            inc = 1
+            if score >= 90:
+                inc = 2
+            if score >= 97:
+                inc = 3
+            if ai["trades"] >= max(min_trades, 50) and ai["winrate"] >= 70:
+                inc += 1
+            if strategy in ("no_trade", "unknown", "-"):
+                inc = min(inc, 1)
+            lev = min(max_lev, base_lev + max(0, inc))
+            reason.append(f"score={score:.1f} wr={ai['winrate']:.1f}% n={ai['trades']} +{max(0, lev-base_lev)}")
+
+        lev = int(max(min_lev, min(max_lev, lev)))
+        info = {
+            "enabled": bool(enabled),
+            "base": int(base_lev),
+            "lev": int(lev),
+            "min": int(min_lev),
+            "max": int(max_lev),
+            "hard_cap": int(hard_cap),
+            "min_trades": int(min_trades),
+            "min_wr": float(min_wr),
+            "min_score": float(min_score),
+            "trades": int(ai["trades"]),
+            "winrate": float(ai["winrate"]),
+            "score": float(score),
+            "symbol": symbol,
+            "side": side,
+            "strategy": strategy,
+            "regime": regime,
+            "reason": "; ".join(reason) if reason else "-",
+            "ts": int(_ailev_time.time()),
+        }
+        try:
+            if not hasattr(self, "state") or not isinstance(self.state, dict):
+                self.state = {}
+            self.state["ai_auto_lev"] = info
+        except Exception:
+            pass
+        return info
+
+    _ailev_prev_mp = getattr(Trader, "_mp", None)
+    if callable(_ailev_prev_mp):
+        def _ailev_mp(self):
+            mp = _ailev_prev_mp(self)
+            try:
+                out = dict(mp or {})
+            except Exception:
+                out = mp
+            try:
+                if isinstance(out, dict):
+                    info = _ailev_calc(self, out)
+                    if info.get("enabled"):
+                        out["lev"] = int(info.get("lev", out.get("lev", 1)))
+            except Exception as e:
+                try:
+                    if isinstance(out, dict):
+                        out.setdefault("lev", (mp or {}).get("lev", 1) if isinstance(mp, dict) else 1)
+                    self.state["ai_auto_lev_err"] = str(e)
+                except Exception:
+                    pass
+            return out
+        Trader._mp = _ailev_mp
+
+    def _ailev_status_text(self):
+        try:
+            base = _ailev_prev_mp(self) if callable(_ailev_prev_mp) else {}
+            info = _ailev_calc(self, base if isinstance(base, dict) else {})
+        except Exception:
+            info = (getattr(self, "state", {}) or {}).get("ai_auto_lev", {}) or {}
+        on = "ON" if info.get("enabled") else "OFF"
+        return (
+            "⚡ AI AUTO LEV " + on + "\n"
+            + f"lev={info.get('base','-')}→{info.get('lev','-')} | cap={info.get('max','-')} | hardcap={info.get('hard_cap','-')}\n"
+            + f"score={float(info.get('score',0) or 0):.1f} | wr={float(info.get('winrate',0) or 0):.1f}% | trades={info.get('trades','-')}/{info.get('min_trades','-')}\n"
+            + f"picked={info.get('symbol','-')} {info.get('side','-')} | reason={info.get('reason','-')}"
+        )
+
+    _ailev_prev_handle = getattr(Trader, "handle_command", None)
+    if callable(_ailev_prev_handle):
+        def _ailev_handle_command(self, text: str):
+            raw = (text or "").strip()
+            parts = raw.split()
+            cmd = ""
+            arg = ""
+            for i, p in enumerate(parts):
+                if p.startswith("/"):
+                    cmd = p.lower().split("@")[0]
+                    arg = " ".join(parts[i+1:]).strip()
+                    break
+            if cmd in ("/ailev", "/ai레버", "/aileverage"):
+                a = arg.lower().strip()
+                if a in ("on", "1", "true", "yes", "y", "켜", "켜기"):
+                    saved = _ailev_set_dotenv_value("AI_AUTO_LEVERAGE", "true")
+                    try:
+                        self._lev_set_cache = {}
+                    except Exception:
+                        pass
+                    self.notify("⚡ AI 자동 레버리지 ON\n" + _ailev_status_text(self) + ("\n✅ .env 저장됨" if saved else "\n⚠️ 현재 프로세스만 적용"))
+                    return
+                if a in ("off", "0", "false", "no", "n", "꺼", "끄기"):
+                    saved = _ailev_set_dotenv_value("AI_AUTO_LEVERAGE", "false")
+                    try:
+                        self._lev_set_cache = {}
+                    except Exception:
+                        pass
+                    self.notify("⚡ AI 자동 레버리지 OFF\n" + _ailev_status_text(self) + ("\n✅ .env 저장됨" if saved else "\n⚠️ 현재 프로세스만 적용"))
+                    return
+                if a.startswith("max "):
+                    try:
+                        v = int(float(a.split()[1]))
+                        v = max(1, min(20, v))
+                        saved = _ailev_set_dotenv_value("AI_AUTO_LEV_MAX", str(v))
+                        self.notify(f"⚡ AI_AUTO_LEV_MAX={v}\n" + _ailev_status_text(self) + ("\n✅ .env 저장됨" if saved else ""))
+                    except Exception:
+                        self.notify("❌ 사용법: /ailev max 12")
+                    return
+                if a.startswith("mintrades ") or a.startswith("trades "):
+                    try:
+                        v = int(float(a.split()[1]))
+                        v = max(0, min(500, v))
+                        saved = _ailev_set_dotenv_value("AI_AUTO_LEV_MIN_TRADES", str(v))
+                        self.notify(f"⚡ AI_AUTO_LEV_MIN_TRADES={v}\n" + _ailev_status_text(self) + ("\n✅ .env 저장됨" if saved else ""))
+                    except Exception:
+                        self.notify("❌ 사용법: /ailev mintrades 30")
+                    return
+                if a.startswith("score "):
+                    try:
+                        v = float(a.split()[1])
+                        v = max(50.0, min(100.0, v))
+                        saved = _ailev_set_dotenv_value("AI_AUTO_LEV_MIN_SCORE", str(v))
+                        self.notify(f"⚡ AI_AUTO_LEV_MIN_SCORE={v}\n" + _ailev_status_text(self) + ("\n✅ .env 저장됨" if saved else ""))
+                    except Exception:
+                        self.notify("❌ 사용법: /ailev score 82")
+                    return
+                self.notify(
+                    _ailev_status_text(self)
+                    + "\n\n사용법:\n"
+                    + "/ailev on     = 자동 레버리지 켜기\n"
+                    + "/ailev off    = 끄기\n"
+                    + "/ailev max 12 = 최대 레버리지 제한\n"
+                    + "/ailev mintrades 30 = 표본 최소값\n"
+                    + "/ailev score 82 = 상승 최소 점수"
+                )
+                return
+            return _ailev_prev_handle(self, text)
+        Trader.handle_command = _ailev_handle_command
+
+    _ailev_prev_status = getattr(Trader, "status_text", None)
+    if callable(_ailev_prev_status):
+        def _ailev_status(self, *args, **kwargs):
+            text = _ailev_prev_status(self, *args, **kwargs)
+            try:
+                text += "\n" + _ailev_status_text(self)
+            except Exception:
+                pass
+            return text
+        Trader.status_text = _ailev_status
+
+    _ailev_prev_risk = getattr(Trader, "_ops_risk_text", None)
+    if callable(_ailev_prev_risk):
+        def _ailev_risk_text(self):
+            text = _ailev_prev_risk(self)
+            try:
+                text += "\n" + _ailev_status_text(self)
+            except Exception:
+                pass
+            return text
+        Trader._ops_risk_text = _ailev_risk_text
+
+    # Add quick buttons after OPS keyboard patch.
+    def _ailev_keyboard():
+        return {
+            "keyboard": [
+                ["▶️ 시작 /start", "⏹️ 중지 /stop"],
+                ["🛡️ 안전 /safe", "⚔️ 공격 /aggro"],
+                ["📊 상태 /status", "🔍 이유 /why", "🩺 헬스 /health"],
+                ["📜 주문 /orders", "🔄 싱크 /syncpos", "🛡 리스크 /risk"],
+                ["⚡ AI레버상태 /ailev", "⚡ AI레버ON /ailev on", "⚡ AI레버OFF /ailev off"],
+                ["🎯 쿨라OFF /kula off", "🎯 쿨라ON /kula on", "🎯 쿨라HARD /kula hard"],
+                ["🧠 RSI회피ON /avoidrsi on", "🧠 RSI회피OFF /avoidrsi off"],
+                ["🟢 매수 /buy", "🔴 숏 /short", "💥 긴급청산 /panic"],
+                ["🎛️ 버튼켜기 /ui on", "🎛️ 버튼끄기 /ui off"],
+            ],
+            "resize_keyboard": True,
+            "one_time_keyboard": False,
+            "is_persistent": True,
+        }
+    globals()["_tg_keyboard"] = _ailev_keyboard
+
+    _ailev_prev_help = getattr(Trader, "help_text", None)
+    if callable(_ailev_prev_help):
+        def _ailev_help(self):
+            base = _ailev_prev_help(self)
+            if "/ailev" in str(base):
+                return base
+            return str(base).rstrip() + (
+                "\n\n⚡ AI 자동 레버리지\n"
+                "/ailev        상태 확인\n"
+                "/ailev on     켜기\n"
+                "/ailev off    끄기\n"
+                "/ailev max 12 최대 제한\n"
+                "/ailev mintrades 30 표본 최소값\n"
+            )
+        Trader.help_text = _ailev_help
+
+    print("[AI AUTO LEVERAGE SAFE PATCH V1] loaded /ailev on|off|max|mintrades|score", flush=True)
+except Exception as _ailev_e:
+    try:
+        print("[AI AUTO LEVERAGE SAFE PATCH V1] load fail:", _ailev_e, flush=True)
+    except Exception:
+        pass
+# END AI AUTO LEVERAGE SAFE PATCH V1
