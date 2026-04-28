@@ -5746,3 +5746,177 @@ except Exception as _stability_v2_e:
 # END STABILITY_PATCH_V2
 # =========================
 
+
+# =========================
+# TELEGRAM KULA CONTROL PATCH
+# - /kula on|off|hard|toggle
+# - updates current process env and .env persistently
+# - adds KULA/RSI quick buttons to Telegram keyboard
+# =========================
+try:
+    import os as _ctl_os
+    from pathlib import Path as _ctl_Path
+
+    def _ctl_bool(v, default=False):
+        if v is None:
+            return bool(default)
+        return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+    def _ctl_env_bool(name, default=False):
+        try:
+            if "_kg_env_bool" in globals() and callable(globals().get("_kg_env_bool")):
+                return bool(globals()["_kg_env_bool"](name, default))
+        except Exception:
+            pass
+        return _ctl_bool(_ctl_os.getenv(name, str(default)), default)
+
+    def _ctl_set_dotenv_value(name, value):
+        """Set one KEY=value in .env and os.environ. Duplicate keys are collapsed."""
+        name = str(name).strip()
+        value = str(value).strip()
+        _ctl_os.environ[name] = value
+        try:
+            p = _ctl_Path(".env")
+            raw = p.read_text(encoding="utf-8") if p.exists() else ""
+            lines = raw.splitlines()
+            out = []
+            written = False
+            prefix = name + "="
+            for line in lines:
+                if line.strip().startswith(prefix):
+                    if not written:
+                        out.append(f"{name}={value}")
+                        written = True
+                    # skip duplicate same-key lines
+                else:
+                    out.append(line)
+            if not written:
+                if out and out[-1].strip() != "":
+                    out.append("")
+                out.append(f"{name}={value}")
+            p.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+            return True
+        except Exception:
+            return False
+
+    def _ctl_kula_status_line():
+        return f"🎯 KULA={'ON' if _ctl_env_bool('KULA_ON', False) else 'OFF'} HARD={'ON' if _ctl_env_bool('KULA_HARD_FILTER', False) else 'OFF'}"
+
+    def _ctl_apply_kula(self, mode):
+        m = str(mode or "").strip().lower()
+        if m in ("on", "soft", "1", "true", "yes", "y", "기본", "소프트"):
+            ok1 = _ctl_set_dotenv_value("KULA_ON", "true")
+            ok2 = _ctl_set_dotenv_value("KULA_HARD_FILTER", "false")
+            msg = "🎯 KULA SOFT ON\n- 점수 보너스만 사용\n- HARD 차단은 OFF"
+        elif m in ("hard", "hardon", "filter", "filteron", "강", "하드"):
+            ok1 = _ctl_set_dotenv_value("KULA_ON", "true")
+            ok2 = _ctl_set_dotenv_value("KULA_HARD_FILTER", "true")
+            msg = "🎯 KULA HARD ON\n- 쿨라 조건 안 맞으면 진입 차단\n- 거래 수 줄어들 수 있음"
+        elif m in ("off", "0", "false", "no", "n", "끄기", "꺼", "꺼짐"):
+            ok1 = _ctl_set_dotenv_value("KULA_ON", "false")
+            ok2 = _ctl_set_dotenv_value("KULA_HARD_FILTER", "false")
+            try:
+                if not hasattr(self, "state") or not isinstance(self.state, dict):
+                    self.state = {}
+                self.state["last_kula_reason"] = "KULA_OFF"
+                if str(self.state.get("last_skip_reason", "")).startswith("KULA"):
+                    self.state["last_skip_reason"] = "KULA_OFF_BY_COMMAND"
+            except Exception:
+                pass
+            msg = "🎯 KULA OFF\n- 쿨라 필터/보너스 모두 OFF"
+        elif m in ("toggle", "tog", "토글"):
+            if _ctl_env_bool("KULA_ON", False):
+                return _ctl_apply_kula(self, "off")
+            return _ctl_apply_kula(self, "on")
+        else:
+            try:
+                st = getattr(self, "state", {}) or {}
+                reason = st.get("last_kula_reason", "-")
+            except Exception:
+                reason = "-"
+            self.notify(
+                _ctl_kula_status_line()
+                + f"\nreason={reason}\n\n"
+                + "사용법:\n"
+                + "/kula off  = 완전 끄기 추천\n"
+                + "/kula on   = 소프트 ON\n"
+                + "/kula hard = 하드 차단 ON\n"
+                + "/kula toggle"
+            )
+            return
+        saved = "저장됨" if (ok1 and ok2) else "현재 프로세스만 적용됨(.env 저장 실패)"
+        self.notify(msg + f"\n{_ctl_kula_status_line()}\n✅ {saved}")
+
+    def _ctl_parse_slash(text):
+        parts = str(text or "").strip().split()
+        for i, p in enumerate(parts):
+            if p.startswith("/"):
+                return p.lower(), " ".join(parts[i + 1:]).strip()
+        return "", ""
+
+    # Override Telegram reply keyboard. Existing /status uses the global _tg_keyboard at call time.
+    def _tg_keyboard():
+        return {
+            "keyboard": [
+                ["▶️ 시작 /start", "⏹️ 중지 /stop"],
+                ["🛡️ 안전 /safe", "⚔️ 공격 /aggro"],
+                ["📊 상태 /status", "🔍 이유 /why", "❓ 도움말 /help"],
+                ["🎯 쿨라OFF /kula off", "🎯 쿨라ON /kula on"],
+                ["🎯 쿨라HARD /kula hard", "🎯 쿨라상태 /kula"],
+                ["🧠 RSI회피ON /avoidrsi on", "🧠 RSI회피OFF /avoidrsi off"],
+                ["🟢 매수 /buy", "🔴 숏 /short", "💥 긴급청산 /panic"],
+                ["🎛️ 버튼켜기 /ui on", "🎛️ 버튼끄기 /ui off"],
+            ],
+            "resize_keyboard": True,
+            "one_time_keyboard": False,
+            "is_persistent": True,
+        }
+    globals()["_tg_keyboard"] = _tg_keyboard
+
+    _ctl_prev_handle_command = getattr(Trader, "handle_command", None)
+    if callable(_ctl_prev_handle_command):
+        def _ctl_handle_command(self, text: str):
+            c0, arg = _ctl_parse_slash(text)
+            if c0 in ("/kula", "/쿨라"):
+                _ctl_apply_kula(self, arg or "status")
+                return
+            if c0 in ("/kulaoff", "/쿨라off", "/쿨라끄기"):
+                _ctl_apply_kula(self, "off")
+                return
+            if c0 in ("/kulaon", "/쿨라on", "/쿨라켜기"):
+                _ctl_apply_kula(self, "on")
+                return
+            if c0 in ("/kulahard", "/쿨라hard"):
+                _ctl_apply_kula(self, "hard")
+                return
+            return _ctl_prev_handle_command(self, text)
+        Trader.handle_command = _ctl_handle_command
+
+    _ctl_prev_help_text = getattr(Trader, "help_text", None)
+    if callable(_ctl_prev_help_text):
+        def _ctl_help_text(self, *args, **kwargs):
+            base = str(_ctl_prev_help_text(self, *args, **kwargs))
+            if "/kula off" not in base:
+                base += (
+                    "\n🎯 KULA 빠른제어\n"
+                    "/kula off  = 쿨라 완전 OFF 추천\n"
+                    "/kula on   = 소프트 ON\n"
+                    "/kula hard = 하드 차단 ON\n"
+                    "/kula      = 현재 상태\n"
+                )
+            return base
+        Trader.help_text = _ctl_help_text
+
+    try:
+        print("[KULA CONTROL PATCH] loaded /kula on|off|hard buttons=True")
+    except Exception:
+        pass
+
+except Exception as _ctl_patch_e:
+    try:
+        print("[KULA CONTROL PATCH] load fail:", _ctl_patch_e)
+    except Exception:
+        pass
+# =========================
+# END TELEGRAM KULA CONTROL PATCH
+# =========================
