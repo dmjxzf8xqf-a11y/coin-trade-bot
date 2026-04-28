@@ -4581,7 +4581,24 @@ try:
             try:
                 # === correlation filter ===
                 if is_correlated and hasattr(self, "positions"):
-                    open_pos = list(getattr(self, "positions", {}).keys())
+                    # Robust position symbol extraction: current bot stores self.positions as a list.
+                    # Older AI patch assumed dict and called .keys(), which spammed:
+                    # AI_PATCH_ERR 'list' object has no attribute 'keys'
+                    positions_obj = getattr(self, "positions", None)
+                    open_pos = []
+                    if isinstance(positions_obj, dict):
+                        open_pos = [str(k).upper() for k in positions_obj.keys() if k]
+                    elif isinstance(positions_obj, list):
+                        for p in positions_obj:
+                            try:
+                                if isinstance(p, dict):
+                                    sym = p.get("symbol") or p.get("sym") or p.get("coin")
+                                    if sym:
+                                        open_pos.append(str(sym).upper())
+                                elif isinstance(p, str):
+                                    open_pos.append(p.upper())
+                            except Exception:
+                                continue
                     if is_correlated(symbol, open_pos):
                         self.state["last_skip_reason"] = "CORRELATION_BLOCK"
                         return
