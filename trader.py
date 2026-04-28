@@ -5937,3 +5937,497 @@ except Exception as _ctl_patch_e:
 # =========================
 # END TELEGRAM KULA CONTROL PATCH
 # =========================
+
+# =========================
+# WHY DETAIL PATCH V3
+# - separates picked symbol from last_skip symbol
+# - records per-symbol liquidity/spread snapshots
+# - writes data/decisions.jsonl directly when possible
+# - trading logic unchanged
+# =========================
+try:
+    import os as _why3_os
+    import time as _why3_time
+    import json as _why3_json
+
+    def _why3_state(self):
+        try:
+            if not hasattr(self, "state") or not isinstance(self.state, dict):
+                self.state = {}
+            return self.state
+        except Exception:
+            return {}
+
+    def _why3_float(x, default=None):
+        try:
+            if x is None or x == "":
+                return default
+            return float(x)
+        except Exception:
+            return default
+
+    def _why3_int(x, default=0):
+        try:
+            return int(float(x))
+        except Exception:
+            return default
+
+    def _why3_clip(x, n=90):
+        try:
+            s = str(x or "").replace("\n", " | ").strip()
+        except Exception:
+            s = ""
+        if len(s) > n:
+            return s[: max(0, n - 1)] + "…"
+        return s
+
+    def _why3_money(x):
+        v = _why3_float(x, None)
+        if v is None:
+            return "-"
+        try:
+            if abs(v) >= 1000000000:
+                return f"{v/1000000000:.2f}B"
+            if abs(v) >= 1000000:
+                return f"{v/1000000:.2f}M"
+            if abs(v) >= 1000:
+                return f"{v/1000:.1f}K"
+            return f"{v:.0f}"
+        except Exception:
+            return str(x)
+
+    def _why3_num(x, digits=4):
+        v = _why3_float(x, None)
+        if v is None:
+            return "-"
+        try:
+            return f"{v:.{digits}f}"
+        except Exception:
+            return str(x)
+
+    def _why3_age(ts):
+        try:
+            ts = float(ts or 0)
+            if ts <= 0:
+                return "-"
+            return f"{max(0, int(_why3_time.time() - ts))}s ago"
+        except Exception:
+            return "-"
+
+    def _why3_decisions_path():
+        try:
+            return data_path("decisions.jsonl")
+        except Exception:
+            return "decisions.jsonl"
+
+    def _why3_log(kind, **rec):
+        try:
+            path = _why3_decisions_path()
+            rec = dict(rec or {})
+            rec.setdefault("ts", int(_why3_time.time()))
+            rec.setdefault("kind", str(kind or "event"))
+            # Keep log append cheap and safe.
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(_why3_json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+            return True
+        except Exception:
+            return False
+
+    def _why3_market_snapshot(symbol):
+        sym = str(symbol or "").upper()
+        out = {"symbol": sym, "ticker_ok": False}
+        try:
+            t = get_ticker(sym) or {}
+            bid = _why3_float(t.get("bid1Price"), 0.0) or 0.0
+            ask = _why3_float(t.get("ask1Price"), 0.0) or 0.0
+            last = _why3_float(t.get("lastPrice"), None)
+            mark = _why3_float(t.get("markPrice"), None)
+            turnover = _why3_float(t.get("turnover24h"), 0.0) or 0.0
+            volume = _why3_float(t.get("volume24h"), 0.0) or 0.0
+            mid = ((bid + ask) / 2.0) if bid > 0 and ask > 0 else (_why3_float(last, 0.0) or 0.0)
+            spread_bps = None
+            if bid > 0 and ask > 0 and mid > 0:
+                spread_bps = ((ask - bid) / mid) * 10000.0
+            min_turn = _why3_float(globals().get("MIN_TURNOVER24H_USDT", 0), 0.0) or 0.0
+            max_spread = _why3_float(globals().get("MAX_SPREAD_BPS", 0), 0.0) or 0.0
+            out.update({
+                "ticker_ok": True,
+                "bid": bid,
+                "ask": ask,
+                "lastPrice": last,
+                "markPrice": mark,
+                "turnover24h": turnover,
+                "volume24h": volume,
+                "spread_bps": spread_bps,
+                "min_turnover": min_turn,
+                "max_spread_bps": max_spread,
+                "liq_ok": (turnover >= min_turn) if min_turn > 0 else None,
+                "spread_ok": (spread_bps <= max_spread) if (spread_bps is not None and max_spread > 0) else None,
+            })
+        except Exception as e:
+            out.update({"ticker_error": str(e)})
+        return out
+
+    def _why3_market_line(m):
+        try:
+            if not isinstance(m, dict) or not m.get("ticker_ok"):
+                return "market=-"
+            liq_ok = m.get("liq_ok")
+            sp_ok = m.get("spread_ok")
+            liq = "OK" if liq_ok is True else ("NO" if liq_ok is False else "-")
+            spr = "OK" if sp_ok is True else ("NO" if sp_ok is False else "-")
+            return (
+                f"turnover={_why3_money(m.get('turnover24h'))}/{_why3_money(m.get('min_turnover'))} {liq} | "
+                f"spread={_why3_num(m.get('spread_bps'), 2)}bps/{_why3_num(m.get('max_spread_bps'), 1)} {spr} | "
+                f"price={_why3_num(m.get('markPrice') or m.get('lastPrice'), 6)}"
+            )
+        except Exception:
+            return "market=?"
+
+    def _why3_parse_metrics(reason):
+        """Best-effort parse of build_reason text; no trading logic dependency."""
+        out = {}
+        try:
+            s = str(reason or "")
+            for part in s.replace("\n", " | ").split("|"):
+                p = part.strip().lstrip("- ").strip()
+                if p.startswith("price="):
+                    out["price"] = p.split("=", 1)[1].strip()
+                elif p.startswith("EMA") and "," in p:
+                    out["ema"] = p
+                elif p.startswith("RSI"):
+                    out["rsi"] = p
+                elif p.startswith("ATR"):
+                    out["atr"] = p
+                elif p.startswith("trend_ok="):
+                    out["trend_enter"] = p
+        except Exception:
+            pass
+        return out
+
+    if not getattr(Trader, "_why_detail_v3_applied", False):
+        Trader._why_detail_v3_applied = True
+
+        _why3_prev_score_symbol = getattr(Trader, "_score_symbol", None)
+        if callable(_why3_prev_score_symbol):
+            def _why3_score_symbol(self, symbol: str, price: float, *args, **kwargs):
+                ts = int(_why3_time.time())
+                sym = str(symbol or "").upper()
+                st = _why3_state(self)
+                market = _why3_market_snapshot(sym) if _why3_os.getenv("WHY_MARKET_SNAPSHOT", "true").lower() in ("1", "true", "yes", "y", "on") else {"symbol": sym}
+                try:
+                    info = _why3_prev_score_symbol(self, symbol, price, *args, **kwargs)
+                except Exception as e:
+                    rec = {"ts": ts, "symbol": sym, "price": _why3_float(price, 0.0), "ok": False, "reason": f"SCORE_ERR:{e}", "market": market}
+                    try:
+                        st["why_last_block"] = rec
+                        st.setdefault("why_decisions", []).append(rec)
+                        st["why_decisions"] = st.get("why_decisions", [])[-80:]
+                    except Exception:
+                        pass
+                    _why3_log("score_error", **rec)
+                    raise
+
+                try:
+                    info_d = dict(info) if isinstance(info, dict) else {"raw": repr(info)}
+                    try:
+                        mp = self._mp()
+                    except Exception:
+                        mp = {}
+                    rec = {
+                        "ts": ts,
+                        "symbol": sym,
+                        "side": str(info_d.get("side") or "-").upper(),
+                        "price": _why3_float(price, 0.0),
+                        "ok": bool(info_d.get("ok", False)),
+                        "score": _why3_float(info_d.get("score"), None),
+                        "need": _why3_float((mp or {}).get("enter_score"), None),
+                        "strategy": info_d.get("strategy") or "-",
+                        "reason": _why3_clip(info_d.get("reason"), 260),
+                        "market": market,
+                        "metrics": _why3_parse_metrics(info_d.get("reason")),
+                    }
+                    if rec.get("score") is not None and rec.get("need") is not None:
+                        rec["shortage"] = round(float(rec["need"]) - float(rec["score"]), 4)
+                    by = st.setdefault("why_by_symbol", {})
+                    if isinstance(by, dict):
+                        by[sym] = rec
+                        # Trim old symbols lightly.
+                        if len(by) > 160:
+                            for k in list(by.keys())[:40]:
+                                by.pop(k, None)
+                    arr = st.setdefault("why_decisions", [])
+                    arr.append(rec)
+                    st["why_decisions"] = arr[-80:]
+                    st["why_last_decision_ts"] = ts
+                    if rec.get("ok"):
+                        st["why_last_ok"] = rec
+                    else:
+                        st["why_last_block"] = rec
+                        if "LIQ_BLOCK" in str(rec.get("reason") or ""):
+                            st["why_last_liq_block"] = rec
+                    _why3_log("score", **rec)
+                except Exception:
+                    pass
+                return info
+            Trader._score_symbol = _why3_score_symbol
+
+        _why3_prev_pick_best = getattr(Trader, "pick_best", None)
+        if callable(_why3_prev_pick_best):
+            def _why3_pick_best(self, *args, **kwargs):
+                st = _why3_state(self)
+                try:
+                    rv = _why3_prev_pick_best(self, *args, **kwargs)
+                except Exception as e:
+                    try:
+                        st["why_pick_error"] = str(e)
+                        _why3_log("pick_error", error=str(e))
+                    except Exception:
+                        pass
+                    raise
+                try:
+                    rec = None
+                    if isinstance(rv, dict):
+                        sym = str(rv.get("symbol") or "").upper()
+                        by = st.get("why_by_symbol") if isinstance(st.get("why_by_symbol"), dict) else {}
+                        rec = dict(by.get(sym) or {})
+                        rec.update({
+                            "ts": int(_why3_time.time()),
+                            "symbol": sym,
+                            "side": str(rv.get("side") or rec.get("side") or "-").upper(),
+                            "score": _why3_float(rv.get("score"), rec.get("score")),
+                            "strategy": rv.get("strategy") or rec.get("strategy") or "-",
+                            "price": _why3_float(rv.get("price"), rec.get("price")),
+                            "reason": _why3_clip(rv.get("reason") or rec.get("reason"), 260),
+                            "market": rec.get("market") or _why3_market_snapshot(sym),
+                        })
+                    st["why_picked"] = rec
+                    st["why_pick_ts"] = int(_why3_time.time())
+                    _why3_log("pick", picked=rec, picked_none=(rec is None))
+                except Exception:
+                    pass
+                return rv
+            Trader.pick_best = _why3_pick_best
+
+        _why3_prev_enter = getattr(Trader, "_enter", None)
+        if callable(_why3_prev_enter):
+            def _why3_enter(self, symbol: str, side: str, price: float, reason: str, sl: float, tp: float, strategy: str = "", score: float = 0.0, atr: float = 0.0, *args, **kwargs):
+                st = _why3_state(self)
+                sym = str(symbol or "").upper()
+                sside = str(side or "").upper()
+                try:
+                    before_pos = len(getattr(self, "positions", []) or [])
+                except Exception:
+                    before_pos = 0
+                before_skip = str(st.get("last_skip_reason", "") or getattr(self, "_last_skip_reason", "") or "")
+                attempt = {
+                    "ts": int(_why3_time.time()),
+                    "symbol": sym,
+                    "side": sside,
+                    "price": _why3_float(price, 0.0),
+                    "score": _why3_float(score, None),
+                    "strategy": strategy or "-",
+                    "reason": _why3_clip(reason, 260),
+                    "sl": _why3_float(sl, None),
+                    "tp": _why3_float(tp, None),
+                    "atr": _why3_float(atr, None),
+                    "market": _why3_market_snapshot(sym),
+                }
+                st["why_last_enter_attempt"] = attempt
+                _why3_log("enter_attempt", **attempt)
+                try:
+                    rv = _why3_prev_enter(self, symbol, side, price, reason, sl, tp, strategy, score, atr, *args, **kwargs)
+                    try:
+                        after_pos = len(getattr(self, "positions", []) or [])
+                    except Exception:
+                        after_pos = before_pos
+                    after_skip = str(st.get("last_skip_reason", "") or getattr(self, "_last_skip_reason", "") or "")
+                    last_event = str(st.get("last_event", "") or "")
+                    if after_pos > before_pos or last_event.startswith(f"UF_ENTER {sym} {sside}"):
+                        result = "ENTER_ATTEMPTED_OR_DONE"
+                        block = "-"
+                    elif after_skip and after_skip != before_skip:
+                        result = "ENTER_BLOCKED"
+                        block = after_skip
+                    elif after_skip:
+                        result = "ENTER_RETURNED_NONE"
+                        block = after_skip
+                    else:
+                        result = "ENTER_RETURNED_NONE"
+                        block = "UNKNOWN_NO_POSITION_CHANGE"
+                    done = dict(attempt)
+                    done.update({"result": result, "block": _why3_clip(block, 180), "positions_before": before_pos, "positions_after": after_pos, "last_event": _why3_clip(last_event, 140)})
+                    st["why_last_enter_result"] = done
+                    _why3_log("enter_result", **done)
+                    return rv
+                except Exception as e:
+                    err = dict(attempt)
+                    err.update({"result": "ENTER_ERROR", "error": str(e)})
+                    st["why_last_enter_result"] = err
+                    _why3_log("enter_error", **err)
+                    raise
+            Trader._enter = _why3_enter
+
+        def _why3_why_text(self):
+            st = _why3_state(self)
+            try:
+                mp = self._mp()
+            except Exception:
+                mp = {}
+            try:
+                pos_n = len(getattr(self, "positions", []) or [])
+            except Exception:
+                pos_n = 0
+            try:
+                cooldown_left = max(0, int(float(getattr(self, "_cooldown_until", 0) or 0) - _why3_time.time()))
+            except Exception:
+                cooldown_left = 0
+            try:
+                allowed_now = entry_allowed_now_utc()
+            except Exception:
+                allowed_now = "?"
+            mtf = st.get("mtf") if isinstance(st.get("mtf"), dict) else {}
+            picked = st.get("why_picked") or st.get("why_last_ok")
+            last_block = st.get("why_last_block") if isinstance(st.get("why_last_block"), dict) else None
+            last_liq = st.get("why_last_liq_block") if isinstance(st.get("why_last_liq_block"), dict) else None
+            enter_attempt = st.get("why_last_enter_attempt") if isinstance(st.get("why_last_enter_attempt"), dict) else None
+            enter_result = st.get("why_last_enter_result") if isinstance(st.get("why_last_enter_result"), dict) else None
+            last_scan = st.get("last_scan") if isinstance(st.get("last_scan"), dict) else {}
+            old_picked = last_scan.get("picked")
+            last_skip = str(getattr(self, "_last_skip_reason", "") or st.get("last_skip_reason", "") or "")
+            last_event = str(st.get("last_event", "") or "")
+
+            lines = []
+            lines.append("🔍 WHY+ / 진입 판단 강화")
+            lines.append(f"ON={bool(getattr(self, 'trading_enabled', False))} | MODE={getattr(self, 'mode', '-')} | DRY_RUN={DRY_RUN}")
+            lines.append(f"score>={mp.get('enter_score', '-')} | lev={mp.get('lev', '-')} | usdt={mp.get('order_usdt', '-')} | pos={pos_n}/{getattr(self, 'max_positions', '-')}")
+            lines.append(f"AUTO={getattr(self, 'auto_symbol', '-')} | DISC={getattr(self, 'auto_discovery', '-')} | DIV={getattr(self, 'diversify', '-')} | universe={len(getattr(self, 'symbols', []) or [])}")
+            lines.append(f"allowed_now={allowed_now} | cooldown={cooldown_left}s | day_entries={getattr(self, '_day_entries', 0)}/{MAX_ENTRIES_PER_DAY}")
+            lines.append(f"filters: MTF={USE_MTF_FILTER}({mtf.get('trend','-')}) LIQ={USE_LIQUIDITY_FILTER} minTurn={_why3_money(globals().get('MIN_TURNOVER24H_USDT', 0))} spread<={MAX_SPREAD_BPS}bps avoidRSI={bool(st.get('avoid_low_rsi', False))}")
+            try:
+                lines.append(f"hard={globals().get('HARDENING_ON', '-')} adx>={globals().get('HARD_MIN_ADX', '-')} atr%={globals().get('HARD_MIN_ATR_PCT', '-')}-{globals().get('HARD_MAX_ATR_PCT', '-')}")
+            except Exception:
+                pass
+            try:
+                if '_ctl_env_bool' in globals():
+                    lines.append(f"kula={_ctl_env_bool('KULA_ON', False)} hard={_ctl_env_bool('KULA_HARD_FILTER', False)} reason={st.get('last_kula_reason', '-')}")
+                elif '_kg_env_bool' in globals():
+                    lines.append(f"kula={_kg_env_bool('KULA_ON', False)} hard={_kg_env_bool('KULA_HARD_FILTER', False)} reason={st.get('last_kula_reason', '-')}")
+            except Exception:
+                pass
+
+            blockers = []
+            if not bool(getattr(self, 'trading_enabled', False)):
+                blockers.append("거래 OFF")
+            if pos_n >= int(getattr(self, 'max_positions', 1) or 1):
+                blockers.append("MAX_POSITIONS 도달")
+            if cooldown_left > 0:
+                blockers.append(f"쿨다운 {cooldown_left}s")
+            if allowed_now is False:
+                blockers.append(f"시간필터 UTC {TRADE_HOURS_UTC}")
+            if int(getattr(self, '_day_entries', 0) or 0) >= int(MAX_ENTRIES_PER_DAY):
+                blockers.append("일일 진입 제한")
+            if blockers:
+                lines.append("🚫 즉시차단: " + ", ".join(blockers))
+
+            if picked:
+                lines.append(f"picked={picked.get('symbol','-')} {picked.get('side','-')} score={picked.get('score','-')}/{picked.get('need','-')} strategy={picked.get('strategy','-')} age={_why3_age(picked.get('ts'))}")
+                lines.append("picked_market: " + _why3_market_line(picked.get("market")))
+                met = picked.get("metrics") if isinstance(picked.get("metrics"), dict) else {}
+                if met:
+                    parts = [met.get("ema"), met.get("rsi"), met.get("atr"), met.get("trend_enter")]
+                    lines.append("picked_ind: " + _why3_clip(" | ".join([p for p in parts if p]), 160))
+                if picked.get("reason"):
+                    lines.append("picked_reason=" + _why3_clip(picked.get("reason"), 150))
+            elif isinstance(old_picked, dict):
+                try:
+                    lines.append(f"picked={old_picked.get('symbol')} {old_picked.get('side')} score={old_picked.get('score')} strategy={old_picked.get('strategy','-')} [legacy]")
+                except Exception:
+                    lines.append("picked=legacy")
+            else:
+                lines.append("picked=None")
+
+            if enter_attempt:
+                lines.append(f"enter_attempt={enter_attempt.get('symbol','-')} {enter_attempt.get('side','-')} score={enter_attempt.get('score','-')} age={_why3_age(enter_attempt.get('ts'))}")
+                lines.append("enter_market: " + _why3_market_line(enter_attempt.get("market")))
+            if enter_result:
+                lines.append(f"enter_result={enter_result.get('result','-')} block={_why3_clip(enter_result.get('block','-'), 100)} pos {enter_result.get('positions_before','-')}→{enter_result.get('positions_after','-')}")
+
+            if last_skip:
+                lines.append(f"last_skip={_why3_clip(last_skip, 130)}")
+            if last_event:
+                lines.append(f"last_event={_why3_clip(last_event, 130)}")
+
+            if last_block:
+                lines.append(f"last_block={last_block.get('symbol','-')} {last_block.get('side','-')} {_why3_clip(last_block.get('reason','-'), 100)} age={_why3_age(last_block.get('ts'))}")
+                lines.append("block_market: " + _why3_market_line(last_block.get("market")))
+            if last_liq:
+                lines.append(f"last_liq_block={last_liq.get('symbol','-')} {_why3_clip(last_liq.get('reason','-'), 90)}")
+                lines.append("liq_market: " + _why3_market_line(last_liq.get("market")))
+                try:
+                    ps = str((picked or {}).get("symbol") or "")
+                    ls = str(last_liq.get("symbol") or "")
+                    pm = (picked or {}).get("market") or {}
+                    if ps and ls and ps != ls and pm.get("liq_ok") is True:
+                        lines.append("참고: LIQ_BLOCK은 picked가 아니라 다른 후보의 최근 차단 기록일 가능성이 큼")
+                except Exception:
+                    pass
+
+            fresh = []
+            now = _why3_time.time()
+            for r in list(st.get("why_decisions") or []):
+                try:
+                    if now - float(r.get("ts", 0) or 0) <= 900:
+                        fresh.append(r)
+                except Exception:
+                    pass
+            if fresh:
+                def _why3_sort_key(r):
+                    sc = _why3_float(r.get("score"), -9999.0)
+                    okv = 1 if r.get("ok") else 0
+                    return (okv, sc if sc is not None else -9999.0)
+                lines.append("최근 후보 TOP:")
+                for r in sorted(fresh[-40:], key=_why3_sort_key, reverse=True)[:8]:
+                    sc = r.get("score")
+                    need = r.get("need")
+                    status = "OK" if r.get("ok") else "NO"
+                    lack = ""
+                    try:
+                        if r.get("shortage") is not None and float(r.get("shortage")) > 0:
+                            lack = f" 부족 {float(r.get('shortage')):.0f}"
+                    except Exception:
+                        pass
+                    m = r.get("market") if isinstance(r.get("market"), dict) else {}
+                    lines.append(f"- {r.get('symbol','-')} {r.get('side','-')} {status} {sc}/{need}{lack} {r.get('strategy','-')} | turn={_why3_money(m.get('turnover24h'))} sp={_why3_num(m.get('spread_bps'),2)} | {_why3_clip(r.get('reason'), 58)}")
+            else:
+                reasons = (last_scan or {}).get("reasons") or []
+                if reasons:
+                    lines.append("최근 스캔 차단/탈락:")
+                    for r in reasons[:10]:
+                        lines.append(f"- {_why3_clip(r, 110)}")
+                else:
+                    lines.append("최근 스캔 기록 없음. /status 후 1~2틱 뒤 /why")
+
+            try:
+                p = _why3_decisions_path()
+                exists = _why3_os.path.exists(p)
+                lines.append(f"log={p} exists={exists} | age={_why3_age(st.get('why_last_decision_ts'))}")
+            except Exception:
+                pass
+            return "\n".join(lines)
+
+        Trader.why_text = _why3_why_text
+
+        try:
+            print("[WHY DETAIL V3] loaded detailed picked/skip/liquidity logging")
+        except Exception:
+            pass
+
+except Exception as _why3_e:
+    try:
+        print("[WHY DETAIL V3] load fail:", _why3_e)
+    except Exception:
+        pass
+# =========================
+# END WHY DETAIL PATCH V3
+# =========================
