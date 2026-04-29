@@ -28,6 +28,7 @@ load_dotenv()
 import trader as trader_module
 import ai_score_runtime_patch  # noqa: F401
 import trader_ai_upgrade_patch  # noqa: F401
+import filter_upgrade_runtime_patch_v1  # noqa: F401
 from trader import Trader
 
 
