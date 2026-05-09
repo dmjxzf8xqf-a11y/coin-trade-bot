@@ -1,0 +1,77 @@
+{
+  "_meta": {
+    "version": "institutional_upgrade_v1",
+    "mode": "recommend_first_then_apply",
+    "description": "CORE/WATCH/BLOCK symbol grades + per-symbol live params. Start conservative."
+  },
+  "ONDOUSDT": {
+    "grade": "CORE",
+    "enter_score": 70,
+    "stop_atr": 2.0,
+    "tp_r": 1.5,
+    "max_lev": 8,
+    "size_mult": 1.0,
+    "short": true,
+    "note": "90/180d grid candidate: strong, but keep monitored."
+  },
+  "ZECUSDT": {
+    "grade": "CORE",
+    "enter_score": 70,
+    "stop_atr": 1.5,
+    "tp_r": 2.0,
+    "max_lev": 8,
+    "size_mult": 1.0,
+    "short": true,
+    "note": "90/180d grid candidate: positive, but recent live losses require caution."
+  },
+  "BTCUSDT": {
+    "grade": "WATCH",
+    "enter_score": 78,
+    "stop_atr": 1.8,
+    "tp_r": 1.5,
+    "max_lev": 3,
+    "size_mult": 0.25,
+    "short": true,
+    "note": "High liquidity, but recent grid was weak. Small test only."
+  },
+  "ETHUSDT": {
+    "grade": "WATCH",
+    "enter_score": 78,
+    "stop_atr": 1.8,
+    "tp_r": 1.5,
+    "max_lev": 3,
+    "size_mult": 0.25,
+    "short": true,
+    "note": "High liquidity, but recent grid was weak. Small test only."
+  },
+  "SOLUSDT": {
+    "grade": "WATCH",
+    "enter_score": 80,
+    "stop_atr": 1.8,
+    "tp_r": 1.5,
+    "max_lev": 3,
+    "size_mult": 0.2,
+    "short": true,
+    "note": "Recent grid was poor. Very small test only."
+  },
+  "XRPUSDT": {
+    "grade": "WATCH",
+    "enter_score": 80,
+    "stop_atr": 1.8,
+    "tp_r": 1.5,
+    "max_lev": 3,
+    "size_mult": 0.2,
+    "short": true,
+    "note": "High liquidity watch symbol; needs fresh validation."
+  },
+  "DOGEUSDT": {
+    "grade": "WATCH",
+    "enter_score": 80,
+    "stop_atr": 1.8,
+    "tp_r": 1.5,
+    "max_lev": 3,
+    "size_mult": 0.2,
+    "short": true,
+    "note": "High liquidity watch symbol; needs fresh validation."
+  }
+}
