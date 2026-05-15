@@ -96,8 +96,8 @@ def should_block_entry(trader_obj: Any) -> Tuple[bool, str]:
 
 def cap_mode_params(mp: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(mp or {})
-    lev_cap = _env_float("OPS_LEVERAGE_CAP", 0.0)
-    usdt_cap = _env_float("OPS_ORDER_USDT_CAP", 0.0)
+    lev_cap = _env_float("OPS_LEVERAGE_CAP", 8.0)
+    usdt_cap = _env_float("OPS_ORDER_USDT_CAP", 30.0)
     try:
         if lev_cap > 0 and float(out.get("lev", 0) or 0) > lev_cap:
             out["lev"] = lev_cap
@@ -122,7 +122,7 @@ def compact_status(trader_obj: Any) -> str:
         f"on={_env_bool('OPS_SAFETY_ON', True)} block_now={blocked}",
         f"reason={msg}",
         f"trades={total} wr={wr:.1f}% consec_losses={consec} day≈{day:.2f}",
-        f"lev_cap={_env_float('OPS_LEVERAGE_CAP', 0.0)} order_cap={_env_float('OPS_ORDER_USDT_CAP', 0.0)}",
+        f"lev_cap={_env_float('OPS_LEVERAGE_CAP', 8.0)} order_cap={_env_float('OPS_ORDER_USDT_CAP', 30.0)}",
         "risky_on=" + (", ".join(flags) if flags else "none"),
     ]
     return "\n".join(lines)

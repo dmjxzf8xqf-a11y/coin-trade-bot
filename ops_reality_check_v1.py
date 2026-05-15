@@ -139,6 +139,17 @@ def audit_config(trader_obj: Any = None) -> Dict[str, Any]:
     if spread and spread > 15:
         warnings.append(f"MAX_SPREAD_BPS={spread}: 스프레드 허용폭 큼")
 
+    lev_cap = _float("OPS_LEVERAGE_CAP", 8.0)
+    order_cap = _float("OPS_ORDER_USDT_CAP", 30.0)
+    if lev_cap <= 0:
+        warnings.append("OPS_LEVERAGE_CAP<=0: 레버리지 상한 OFF 상태")
+    elif lev_cap > 12:
+        warnings.append(f"OPS_LEVERAGE_CAP={lev_cap:g}: 소액/저승률 구간에는 과함")
+    if order_cap <= 0:
+        warnings.append("OPS_ORDER_USDT_CAP<=0: 주문 USDT 상한 OFF 상태")
+    elif order_cap > 50:
+        warnings.append(f"OPS_ORDER_USDT_CAP={order_cap:g}: 소액 계좌에는 과함")
+
     flags = risky_flags()
     risky_on = [k for k, v in flags.items() if v and k not in ("ALLOW_SHORT", "DIVERSIFY")]
     if risky_on:

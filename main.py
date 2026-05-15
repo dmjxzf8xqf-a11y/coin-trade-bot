@@ -227,6 +227,22 @@ def tg_send(msg: str, reply_markup: dict | None = None):
         print(f"[TG] send error: {e!r}", flush=True)
 
 
+
+def tg_reset_webhook_once() -> None:
+    """Polling mode guard: remove old Telegram webhook before getUpdates loop."""
+    if not TELEGRAM_API:
+        return
+    try:
+        requests.get(
+            f"{TELEGRAM_API}/deleteWebhook",
+            params={"drop_pending_updates": "false"},
+            timeout=10,
+            proxies=PROXIES,
+        )
+        print("[TG] deleteWebhook requested for polling mode", flush=True)
+    except Exception as e:
+        print(f"[TG] deleteWebhook warning: {e!r}", flush=True)
+
 def telegram_loop():
     global _runtime_chat_id
 
@@ -317,6 +333,7 @@ def trading_loop():
 
 if __name__ == "__main__":
     print("[BOOT] Bot starting...", flush=True)
+    tg_reset_webhook_once()
     threading.Thread(target=telegram_loop, daemon=True).start()
     threading.Thread(target=trading_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)

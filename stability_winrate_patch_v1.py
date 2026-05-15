@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import math
 import os
+import time
+import uuid
 from typing import Any, Callable, Iterable
 
 try:
@@ -318,6 +320,12 @@ if _t is not None and STAB_PATCH_ON:
         return 1 if s == "buy" else 2
 
     def order_market(symbol: str, side: str, qty: float, reduce_only: bool = False):
+        """Safer market order wrapper.
+
+        Keeps the HEDGE positionIdx fix from this patch, but also preserves the
+        original FINAL10 idempotency/confirmation behavior by using orderLinkId
+        and a post-create confirmation check when available.
+        """
         if bool(getattr(_t, "DRY_RUN", False)):
             return {"retCode": 0, "retMsg": "DRY_RUN"}
         q = qty
@@ -325,6 +333,7 @@ if _t is not None and STAB_PATCH_ON:
             q = _t.fix_qty(float(qty), symbol)
         except Exception:
             q = qty
+        order_link_id = f"bot-{int(time.time()*1000)}-{uuid.uuid4().hex[:10]}"
         body = {
             "category": getattr(_t, "CATEGORY", "linear"),
             "symbol": str(symbol).upper(),
@@ -332,6 +341,7 @@ if _t is not None and STAB_PATCH_ON:
             "orderType": "Market",
             "qty": _fmt_qty(float(q)),
             "timeInForce": "IOC",
+            "orderLinkId": order_link_id,
         }
         pidx = _position_idx_for_order(side, bool(reduce_only))
         if pidx is not None:
@@ -340,7 +350,35 @@ if _t is not None and STAB_PATCH_ON:
             body["reduceOnly"] = True
         resp = _t.http.request("POST", "/v5/order/create", body, auth=True)
         if (resp or {}).get("retCode") != 0:
-            raise Exception(f"ORDER FAILED: {resp}")
+            raise Exception(f"ORDER CREATE FAILED: {resp}")
+
+        confirm = getattr(_t, "_final10_confirm_order", None)
+        if callable(confirm):
+            oid = (resp.get("result") or {}).get("orderId")
+            st, od = confirm(symbol, order_id=oid, order_link_id=order_link_id)
+            if st == "Filled":
+                return resp
+            if st in ("Rejected", "Cancelled"):
+                raise Exception(f"ORDER {st}: {od or resp}")
+            st2, od2 = confirm(symbol, order_id=None, order_link_id=order_link_id)
+            if st2 == "Filled":
+                return resp
+            if st2 in ("Rejected", "Cancelled"):
+                raise Exception(f"ORDER {st2}: {od2 or resp}")
+            try:
+                plist = _t.get_positions_all(str(symbol).upper()) or []
+                for p in plist:
+                    if str(p.get("symbol") or "").upper() != str(symbol).upper():
+                        continue
+                    sz = float(p.get("size") or 0.0)
+                    if (not reduce_only) and sz > 0:
+                        return resp
+                    if reduce_only and sz == 0:
+                        return resp
+            except Exception:
+                pass
+            raise Exception(f"ORDER STATUS UNKNOWN (safer stop): symbol={symbol} side={side} qty={q} linkId={order_link_id}")
+
         return resp
 
     _t.order_market = order_market
