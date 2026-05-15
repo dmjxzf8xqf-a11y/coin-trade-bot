@@ -75,9 +75,19 @@ except Exception as e:
     print(f"[BOOT] optional stability/winrate patch skipped: {e}", flush=True)
 
 try:
+    import signal_engine_runtime_patch_v1  # noqa: F401
+except Exception as e:
+    print(f"[BOOT] optional signal engine patch skipped: {e}", flush=True)
+
+try:
     import allin_guard_experimental_patch_v1  # noqa: F401
 except Exception as e:
     print(f"[BOOT] optional all-in experimental patch skipped: {e}", flush=True)
+
+try:
+    import winrate_intelligence_patch_v1  # noqa: F401
+except Exception as e:
+    print(f"[BOOT] optional winrate intelligence patch skipped: {e}", flush=True)
 
 app = Flask(__name__)
 
