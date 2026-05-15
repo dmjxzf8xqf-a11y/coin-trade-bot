@@ -89,6 +89,11 @@ try:
 except Exception as e:
     print(f"[BOOT] optional winrate intelligence patch skipped: {e}", flush=True)
 
+try:
+    import ops_intelligence_patch_v1  # noqa: F401
+except Exception as e:
+    print(f"[BOOT] optional ops intelligence patch skipped: {e}", flush=True)
+
 app = Flask(__name__)
 
 BOT_TOKEN = (os.getenv("BOT_TOKEN", "") or "").strip()
