@@ -11,3 +11,9 @@ ai_stats.json
 data/*.json
 *.zip
 .DS_Store
+data/*.jsonl
+data/*.log
+data/*.tmp
+data/*.bak
+*.bak
+*.tmp
