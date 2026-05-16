@@ -66,14 +66,38 @@ def systemd_active() -> bool:
     return code == 0 and out.splitlines()[0].strip() == "active"
 
 
-def process_count() -> int:
-    code, out = run(["bash", "-lc", "pgrep -af 'python.*main.py' | wc -l"])
+def bot_process_lines() -> List[str]:
+    """Return only real bot main.py Python processes.
+
+    NOTE: `pgrep -af 'python.*main.py'` can count the watchdog's own
+    temporary shell command as an extra match. This caused false duplicate
+    process alerts even when only one real bot was running.
+    """
+    code, out = run(["bash", "-lc", "ps -eo pid=,args="])
     if code != 0:
-        return 0
-    try:
-        return int(out.splitlines()[0].strip())
-    except Exception:
-        return 0
+        return []
+
+    lines: List[str] = []
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if "main.py" not in line or "python" not in line:
+            continue
+        # Exclude helper/search commands that only contain the pattern text.
+        lowered = line.lower()
+        if "bot_watchdog.py" in lowered:
+            continue
+        if "pgrep" in lowered or "grep" in lowered:
+            continue
+        if "bash -lc" in lowered or "sh -c" in lowered:
+            continue
+        lines.append(line)
+    return lines
+
+
+def process_count() -> int:
+    return len(bot_process_lines())
 
 
 def log_tail(path: Path, lines: int = 120) -> str:
